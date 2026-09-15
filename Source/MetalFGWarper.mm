@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <atomic>
 
-const char kMetalFGIsSyntheticKey = '\0';
+extern "C" const char kMetalFGIsSyntheticKey = '\0';
 
 // Embedded fallback Metal Shading Language source
 static NSString * const kEmbeddedMetalSource = @""

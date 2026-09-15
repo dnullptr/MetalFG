@@ -6,8 +6,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// Associated object key to identify synthetic frames and prevent recursive interception
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern const char kMetalFGIsSyntheticKey;
+#ifdef __cplusplus
+}
+#endif
 
 @interface MetalFGWarper : NSObject
 

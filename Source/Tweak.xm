@@ -156,7 +156,6 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         [[MetalFGMotionTracker sharedTracker] startTracking];
         
         // Check for debug preferences
-        NSString *prefPath = @"/var/jb/var/mobile/Library/Preferences/com.metalfg.prefs.plist";
         NSString *prefPath = @"/var/jb/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist";
         NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:prefPath];
         if (!prefs) {
