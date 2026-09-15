@@ -1,0 +1,12 @@
+Package: com.developer.metalfg
+Package: com.dnullptr.metalfg
+Name: MetalFG
+Depends: mobilesubstrate (>= 0.9.5000)
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Low-latency Asynchronous Timewarp (ATW) Frame Generation for Metal games on iOS 16 ProMotion devices.
+Maintainer: MetalFG Team
+Author: MetalFG Team
+Section: Tweaks
+Tag: role::hacker
+

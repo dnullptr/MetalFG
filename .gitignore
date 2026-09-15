@@ -1,0 +1,19 @@
+# Theos build directories and packages
+.theos/
+obj/
+packages/
+_orig/
+
+# Xcode & Apple temporary files
+.DS_Store
+*.swp
+*~
+*.orig
+
+# Intermediate build objects
+*.o
+*.air
+*.dia
+
+# User preferences / local test files
+*.local
