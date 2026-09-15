@@ -257,7 +257,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
     
-    __weak typeof(self) weakSelf = self;
+    __weak MetalFGWarper *weakSelf = self;
     [blitCmd addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
         MetalFGWarper *strongSelf = weakSelf;
         if (!strongSelf) return;
@@ -338,7 +338,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     }
     
     _inFlightGpuFrames.fetch_add(1);
-    __weak typeof(self) weakSelf = self;
+    __weak MetalFGWarper *weakSelf = self;
     [cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
         MetalFGWarper *strongSelf = weakSelf;
         if (strongSelf) {

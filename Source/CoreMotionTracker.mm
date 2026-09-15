@@ -65,7 +65,7 @@
     
     _motionManager.deviceMotionUpdateInterval = _updateInterval;
     
-    __weak typeof(self) weakSelf = self;
+    __weak MetalFGMotionTracker *weakSelf = self;
     [_motionManager startDeviceMotionUpdatesUsingReferenceFrame:CMAttitudeReferenceFrameXArbitraryCorrectedZVertical
                                                        toQueue:_motionQueue
                                                    withHandler:^(CMDeviceMotion * _Nullable motion, NSError * _Nullable error) {
