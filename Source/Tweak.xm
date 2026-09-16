@@ -9,22 +9,17 @@
 #import "../Headers/CoreMotionTracker.h"
 #import "../Headers/MetalFGWarper.h"
 #import "../Headers/MetalFGSynchronizer.h"
+#import "../Headers/MetalFGOverlay.h"
 
-// Minimum dimension threshold to distinguish full-screen game layers from HUD overlays (e.g. MetalHUD, CAPerfHud)
-static const CGFloat kMinGameDimension = 600.0;
+// Minimum dimension threshold to filter out tiny HUDs/overlays (e.g. MetalHUD, CAPerfHud)
+static const CGFloat kMinHUDDimension = 200.0;
 
 // Global reference to the active game layer
 static __weak CAMetalLayer *gActiveMetalLayer = nil;
 
-// Helper: Determine if a layer is the primary game rendering layer
-static inline BOOL IsPrimaryGameLayer(CAMetalLayer *layer) {
+// Helper: Determine if a layer is a candidate for the primary game rendering layer
+static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
     if (!layer) return NO;
-    
-    // Check layer size - ignore small overlays or HUDs
-    CGSize drawableSize = layer.drawableSize;
-    if (drawableSize.width < kMinGameDimension || drawableSize.height < kMinGameDimension) {
-        return NO;
-    }
     
     // Ignore layers with names or classes indicating HUD/debug/metrics
     NSString *className = NSStringFromClass([layer class]);
@@ -33,6 +28,14 @@ static inline BOOL IsPrimaryGameLayer(CAMetalLayer *layer) {
         [className containsString:@"Debug"] ||
         [className containsString:@"Overlay"]) {
         return NO;
+    }
+    
+    // If size is set, check that it's larger than tiny HUD overlays
+    CGSize drawableSize = layer.drawableSize;
+    if (drawableSize.width > 0 && drawableSize.height > 0) {
+        if (drawableSize.width < kMinHUDDimension && drawableSize.height < kMinHUDDimension) {
+            return NO;
+        }
     }
     
     return YES;
@@ -50,6 +53,31 @@ static inline BOOL IsPrimaryGameLayer(CAMetalLayer *layer) {
 %end
 
 // ============================================================================
+// Hook: NSBundle to enable ProMotion 120Hz for any game
+// (Bypasses iOS 16 ProMotion 60Hz throttle on games lacking this plist key)
+// ============================================================================
+%hook NSBundle
+
+- (id)objectForInfoDictionaryKey:(NSString *)key {
+    if ([key isEqualToString:@"CADisableMinimumFrameDurationOnPhone"]) {
+        return @YES;
+    }
+    return %orig;
+}
+
+- (NSDictionary *)infoDictionary {
+    NSDictionary *orig = %orig;
+    if (orig && !orig[@"CADisableMinimumFrameDurationOnPhone"]) {
+        NSMutableDictionary *dict = [orig mutableCopy];
+        dict[@"CADisableMinimumFrameDurationOnPhone"] = @YES;
+        return dict;
+    }
+    return orig;
+}
+
+%end
+
+// ============================================================================
 // Hook: CAMetalLayer Lifecycle & Swapchain Headroom
 // ============================================================================
 %hook CAMetalLayer
@@ -57,10 +85,10 @@ static inline BOOL IsPrimaryGameLayer(CAMetalLayer *layer) {
 - (void)setDevice:(id<MTLDevice>)device {
     %orig(device);
     
-    if (IsPrimaryGameLayer(self)) {
+    if (IsGameLayerCandidate(self)) {
         self.maximumDrawableCount = 3;
         if (@available(iOS 16.0, *)) {
-            // Crucial: timeout instead of deadlocking when GPU backpressure is high
+            // Avoid driver deadlocks when GPU queue backpressure is high
             self.allowsNextDrawableTimeout = YES;
         }
         gActiveMetalLayer = self;
@@ -71,7 +99,7 @@ static inline BOOL IsPrimaryGameLayer(CAMetalLayer *layer) {
 }
 
 - (id<CAMetalDrawable>)nextDrawable {
-    if (IsPrimaryGameLayer(self)) {
+    if (IsGameLayerCandidate(self)) {
         if (self.maximumDrawableCount < 3) {
             self.maximumDrawableCount = 3;
         }
@@ -108,12 +136,20 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     if (!texture) return;
     
     // 2. HUD / Overlay guard: ignore small textures (e.g. CAPerfHud / MetalHUD)
-    if (texture.width < kMinGameDimension || texture.height < kMinGameDimension) {
+    if (texture.width < kMinHUDDimension && texture.height < kMinHUDDimension) {
         return;
     }
     
-    // 3. Layer guard: only process drawables from the active game layer
+    // 3. Bind active layer if not already bound
     CAMetalLayer *activeLayer = [MetalFGSynchronizer sharedSynchronizer].activeLayer;
+    if (!activeLayer && drawable.layer) {
+        activeLayer = drawable.layer;
+        [[MetalFGSynchronizer sharedSynchronizer] startSynchronizerWithLayer:activeLayer
+                                                                    device:activeLayer.device
+                                                               pixelFormat:activeLayer.pixelFormat];
+    }
+    
+    // 4. If layer is set, ensure this drawable belongs to the game layer
     if (activeLayer && drawable.layer && drawable.layer != activeLayer) {
         return;
     }
@@ -143,7 +179,9 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 
 - (void)presentAfterMinimumDuration:(CFTimeInterval)duration {
     ProcessNativePresentation((id<CAMetalDrawable>)self);
-    %orig(duration);
+    // Uncap 60 FPS duration locks (~16.6ms) to 120 FPS duration (~8.33ms)
+    CFTimeInterval uncapped = (duration >= 0.010) ? (1.0 / 120.0) : duration;
+    %orig(uncapped);
 }
 
 %end
@@ -171,40 +209,27 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         ProcessNativePresentation((id<CAMetalDrawable>)drawable);
     }
-    %orig(drawable, duration);
+    // Uncap 60 FPS duration locks (~16.6ms) to 120 FPS duration (~8.33ms)
+    CFTimeInterval uncapped = (duration >= 0.010) ? (1.0 / 120.0) : duration;
+    %orig(drawable, uncapped);
 }
 
 %end
 
 // ============================================================================
-// Constructor & Process Filtering
+// Constructor & Safe Process Filtering
 // ============================================================================
 %ctor {
     @autoreleasepool {
-        // 1. Binary path check: ONLY inject into user applications
-        NSString *executablePath = [NSProcessInfo processInfo].arguments.firstObject;
-        if (!executablePath) return;
-        
-        // Strictly reject any system process or daemon
-        if ([executablePath containsString:@"/System/"] ||
-            [executablePath containsString:@"/usr/"] ||
-            [executablePath containsString:@"/Library/"] ||
-            [executablePath containsString:@"/Applications/"]) {
-            return;
-        }
-        
-        // Must reside in user application bundle container
-        if (![executablePath containsString:@"/Containers/Bundle/Application/"]) {
-            return;
-        }
-        
-        // 2. Bundle ID check: strictly reject any Apple system bundles
         NSString *bundleID = [NSBundle mainBundle].bundleIdentifier;
-        if (!bundleID || [bundleID hasPrefix:@"com.apple."]) {
+        if (!bundleID) return; // Daemons without bundle IDs
+        
+        // Strictly reject any Apple system apps, SpringBoard, and system daemons
+        if ([bundleID hasPrefix:@"com.apple."]) {
             return;
         }
         
-        // Blacklist package managers and jailbreak utilities
+        // Reject jailbreak managers and package managers
         if ([bundleID isEqualToString:@"org.coolstar.SileoStore"] ||
             [bundleID isEqualToString:@"xyz.willy.Zebra"] ||
             [bundleID isEqualToString:@"com.opa334.Dopamine"] ||
@@ -213,9 +238,20 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
             return;
         }
         
+        // Ensure this is an application bundle (.app)
+        NSString *bundlePath = [NSBundle mainBundle].bundlePath;
+        if (!bundlePath || ![bundlePath.pathExtension isEqualToString:@"app"]) {
+            return;
+        }
+        
+        // Strictly reject binaries in system directories
+        if ([bundlePath hasPrefix:@"/System/"] || [bundlePath hasPrefix:@"/Library/"]) {
+            return;
+        }
+        
         NSLog(@"==================================================");
         NSLog(@"[MetalFG] Initializing MetalFG for target game: %@", bundleID);
-        NSLog(@"[MetalFG] Path: %@", executablePath);
+        NSLog(@"[MetalFG] Bundle path: %@", bundlePath);
         NSLog(@"==================================================");
         
         // Initialize Logos hooks strictly for this game process

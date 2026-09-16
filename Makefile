@@ -11,7 +11,8 @@ TWEAK_NAME = MetalFG
 MetalFG_FILES = Source/Tweak.xm \
                 Source/CoreMotionTracker.mm \
                 Source/MetalFGWarper.mm \
-                Source/MetalFGSynchronizer.mm
+                Source/MetalFGSynchronizer.mm \
+                Source/MetalFGOverlay.mm
 
 MetalFG_CFLAGS = -fobjc-arc -IHeaders -std=c++17 -O3 -Wall -Wno-unused-variable
 MetalFG_FRAMEWORKS = Metal QuartzCore CoreMotion UIKit CoreGraphics

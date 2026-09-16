@@ -1,4 +1,5 @@
 #import "../Headers/MetalFGSynchronizer.h"
+#import "../Headers/MetalFGOverlay.h"
 #import <UIKit/UIKit.h>
 #import <os/lock.h>
 
@@ -87,6 +88,7 @@
     os_unfair_lock_unlock(&_syncLock);
     
     [_motionTracker startTracking];
+    [[MetalFGOverlay sharedOverlay] show];
     NSLog(@"[MetalFG] Application became active. Resumed frame synchronizer.");
 }
 
@@ -114,6 +116,9 @@
     }
     
     os_unfair_lock_unlock(&_syncLock);
+    
+    // Show on-screen status overlay
+    [[MetalFGOverlay sharedOverlay] show];
     NSLog(@"[MetalFG] Synchronizer started on dedicated 120Hz display link thread.");
 }
 
@@ -154,8 +159,8 @@
                        orientation:(simd_quatf)orientation {
     if (!_isEnabled || _isBackgrounded) return;
     
-    // Ignore small HUD textures (e.g. CAPerfHud / MetalHUD)
-    if (texture.width < 600 || texture.height < 600) {
+    // Ignore small HUD textures (e.g. CAPerfHud / MetalHUD: typically < 250x150)
+    if (texture.width < 250 || texture.height < 150) {
         return;
     }
     
@@ -185,9 +190,9 @@
         
         if (!layer || !warper || !warper.isReady) return;
         
-        // Ensure layer is of game-level resolution (not an overlay/HUD)
+        // Ignore HUD/sub-layers smaller than 250x150
         CGSize drawableSize = layer.drawableSize;
-        if (drawableSize.width < 600.0 || drawableSize.height < 600.0) {
+        if (drawableSize.width < 250.0 || drawableSize.height < 150.0) {
             return;
         }
         
@@ -196,22 +201,23 @@
             return;
         }
         
-        CFTimeInterval now = link.timestamp;
+        // Use consistent monotonic time for physical elapsed calculation
+        CFTimeInterval now = CACurrentMediaTime();
         CFTimeInterval elapsedSinceNative = now - lastNative;
         
-        // ATW Scheduling Logic:
-        // Display refresh interval at 120Hz = ~8.33ms.
-        // Native 60 FPS frame interval = ~16.67ms.
+        // ATW Pacing Logic:
+        // On 120Hz ProMotion: refresh interval = ~8.33ms (0.00833s).
+        // Native 60 FPS interval = ~16.67ms (0.01667s).
         //
-        // Case 1: Native frame presented recently (< 5.5ms ago).
-        // -> Native frame takes this display slot. Skip synthetic frame.
-        if (elapsedSinceNative < 0.0055) {
+        // Case 1: Native frame presented very recently (< 4.5ms ago).
+        // That native frame is occupying the current hardware refresh cycle. Skip synthetic injection.
+        if (elapsedSinceNative < 0.0045) {
             return;
         }
         
-        // Case 2: Native frame has not arrived in > 100ms (game paused, loading, or static scene).
-        // -> Suspend synthetic generation to conserve GPU power and prevent thermal throttle.
-        if (elapsedSinceNative > 0.100) {
+        // Case 2: Native frame has not arrived in > 150ms (game paused, loading screen, or static menu).
+        // Suspend synthetic generation to conserve GPU power and prevent thermal throttle.
+        if (elapsedSinceNative > 0.150) {
             return;
         }
         
@@ -221,7 +227,7 @@
             return;
         }
         
-        // Case 4: Intermediate VSYNC tick! (e.g. 5.5ms - 15.0ms since last native frame)
+        // Case 4: Intermediate VSYNC tick! (e.g. 4.5ms - 15.0ms since last native frame)
         // Safely acquire next drawable (allowsNextDrawableTimeout prevents deadlock)
         id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
         if (!syntheticDrawable || !syntheticDrawable.texture) {
@@ -257,14 +263,19 @@
             _syntheticFrameCount++;
         }
         
-        // Periodic FPS logging
+        // Periodic FPS logging & On-Screen Overlay update (every 1.0s)
         CFTimeInterval statsNow = CACurrentMediaTime();
-        if (statsNow - _lastStatsLogTime >= 3.0) {
+        if (statsNow - _lastStatsLogTime >= 1.0) {
             double duration = statsNow - _lastStatsLogTime;
             double nativeFps = (double)_nativeFrameCount / duration;
             double syntheticFps = (double)_syntheticFrameCount / duration;
+            
+            // Update floating on-screen indicator
+            [[MetalFGOverlay sharedOverlay] updateWithNativeFPS:nativeFps syntheticFPS:syntheticFps];
+            
             NSLog(@"[MetalFG] Performance: Native: %.1f FPS | Synthetic: %.1f FPS | Total: %.1f FPS",
                   nativeFps, syntheticFps, nativeFps + syntheticFps);
+            
             _nativeFrameCount = 0;
             _syntheticFrameCount = 0;
             _lastStatsLogTime = statsNow;
