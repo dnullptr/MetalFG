@@ -15,60 +15,23 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float2 texCoords;\n"
 "};\n"
 "\n"
-"struct MetalFGUniforms {\n"
-"    float3x3 homographyMatrix;\n"
-"    float3x3 invHomographyMatrix;\n"
-"    float4   edgeFadeParams;\n"
-"    float4   debugColor;\n"
-"};\n"
-"\n"
 "struct RasterizerData {\n"
 "    float4 position [[position]];\n"
 "    float2 texCoords;\n"
-"    float2 ndc;\n"
 "};\n"
 "\n"
 "vertex RasterizerData metalfg_vertex(uint vertexID [[vertex_id]],\n"
-"                                     constant MetalFGVertex *vertices [[buffer(0)]],\n"
-"                                     constant MetalFGUniforms &uniforms [[buffer(1)]]) {\n"
+"                                     constant MetalFGVertex *vertices [[buffer(0)]]) {\n"
 "    RasterizerData out;\n"
-"    float2 pos = vertices[vertexID].position;\n"
-"    out.position = float4(pos, 0.0, 1.0);\n"
+"    out.position = float4(vertices[vertexID].position, 0.0, 1.0);\n"
 "    out.texCoords = vertices[vertexID].texCoords;\n"
-"    out.ndc = pos;\n"
 "    return out;\n"
 "}\n"
 "\n"
 "fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],\n"
-"                                 texture2d<float, access::sample> sourceTexture [[texture(0)]],\n"
-"                                 constant MetalFGUniforms &uniforms [[buffer(1)]]) {\n"
-"    float3 targetNDC = float3(in.ndc.x, in.ndc.y, 1.0);\n"
-"    float3 sourceProj = uniforms.homographyMatrix * targetNDC;\n"
-"    float w = sourceProj.z;\n"
-"    if (w <= 0.0001) {\n"
-"        return float4(0.0, 0.0, 0.0, 1.0);\n"
-"    }\n"
-"    float2 srcNDC = sourceProj.xy / w;\n"
-"    float u = (srcNDC.x + 1.0) * 0.5;\n"
-"    float v = (1.0 - srcNDC.y) * 0.5;\n"
-"    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {\n"
-"        return float4(0.0, 0.0, 0.0, 1.0);\n"
-"    }\n"
-"    float distToBorderX = min(u, 1.0 - u);\n"
-"    float distToBorderY = min(v, 1.0 - v);\n"
-"    float minBorderDist = min(distToBorderX, distToBorderY);\n"
-"    float fadeWidth = uniforms.edgeFadeParams.x;\n"
-"    float edgeFade = 1.0;\n"
-"    if (fadeWidth > 0.0001) {\n"
-"        edgeFade = smoothstep(0.0, fadeWidth, minBorderDist);\n"
-"    }\n"
+"                                 texture2d<float, access::sample> sourceTexture [[texture(0)]]) {\n"
 "    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);\n"
-"    float4 sampledColor = sourceTexture.sample(linearSampler, float2(u, v));\n"
-"    sampledColor.rgb *= edgeFade;\n"
-"    if (uniforms.debugColor.a > 0.0) {\n"
-"        sampledColor.rgb = mix(sampledColor.rgb, uniforms.debugColor.rgb, uniforms.debugColor.a);\n"
-"    }\n"
-"    return sampledColor;\n"
+"    return sourceTexture.sample(linearSampler, in.texCoords);\n"
 "}\n";
 
 // Full-screen quad consisting of 2 triangles (6 vertices)
@@ -297,21 +260,6 @@ static const MetalFGVertex kQuadVertices[6] = {
         return NO;
     }
     
-    MetalFGUniforms uniforms;
-    uniforms.homographyMatrix = homography;
-    uniforms.invHomographyMatrix = invHomography;
-    uniforms.edgeFadeParams = simd_make_float4(_edgeFadeWidth,
-                                               1.0f,
-                                               (float)sourceTex.width / (float)sourceTex.height,
-                                               0.0f);
-    
-    // Debug indicator: subtle green tint on synthetic frames when enabled
-    if (_debugTintEnabled) {
-        uniforms.debugColor = simd_make_float4(0.1f, 0.8f, 0.2f, 0.25f);
-    } else {
-        uniforms.debugColor = simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    }
-    
     MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
     passDesc.colorAttachments[0].texture = targetDrawable.texture;
     passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -323,8 +271,6 @@ static const MetalFGVertex kQuadVertices[6] = {
     id<MTLRenderCommandEncoder> enc = [cmdBuffer renderCommandEncoderWithDescriptor:passDesc];
     [enc setRenderPipelineState:_pipelineState];
     [enc setVertexBuffer:_vertexBuffer offset:0 atIndex:MetalFGBufferIndexVertices];
-    [enc setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:MetalFGBufferIndexUniforms];
-    [enc setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:MetalFGBufferIndexUniforms];
     [enc setFragmentTexture:sourceTex atIndex:MetalFGTextureIndexSource];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [enc endEncoding];

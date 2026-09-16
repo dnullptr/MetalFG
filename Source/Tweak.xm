@@ -84,11 +84,20 @@ static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
 // ============================================================================
 %hook CAMetalLayer
 
+- (void)setFramebufferOnly:(BOOL)framebufferOnly {
+    if (IsGameLayerCandidate(self)) {
+        %orig(NO);
+    } else {
+        %orig(framebufferOnly);
+    }
+}
+
 - (void)setDevice:(id<MTLDevice>)device {
     %orig(device);
     
     if (IsGameLayerCandidate(self)) {
         self.maximumDrawableCount = 3;
+        self.framebufferOnly = NO;
         if (@available(iOS 16.0, *)) {
             // Avoid driver deadlocks when GPU queue backpressure is high
             self.allowsNextDrawableTimeout = YES;
@@ -104,6 +113,9 @@ static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
     if (IsGameLayerCandidate(self)) {
         if (self.maximumDrawableCount < 3) {
             self.maximumDrawableCount = 3;
+        }
+        if (self.framebufferOnly) {
+            self.framebufferOnly = NO;
         }
         if (@available(iOS 16.0, *)) {
             self.allowsNextDrawableTimeout = YES;
@@ -179,9 +191,10 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     CAMetalLayer *activeLayer = [MetalFGSynchronizer sharedSynchronizer].activeLayer;
     if (!activeLayer && drawable.layer) {
         activeLayer = drawable.layer;
+        activeLayer.framebufferOnly = NO;
         [[MetalFGSynchronizer sharedSynchronizer] startSynchronizerWithLayer:activeLayer
                                                                     device:activeLayer.device
-                                                                pixelFormat:activeLayer.pixelFormat];
+                                                               pixelFormat:activeLayer.pixelFormat];
     }
     
     // 5. If layer is set, ensure this drawable belongs to the game layer
@@ -202,45 +215,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 // ============================================================================
 %hook CAMetalDrawable
 
-- (void)present {
-    id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
-    if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
-        [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
-            if ([d conformsToProtocol:@protocol(CAMetalDrawable)]) {
-                ProcessNativePresentation((id<CAMetalDrawable>)d);
-            }
-        }];
-    } else {
-        ProcessNativePresentation(metalDrawable);
-    }
-    %orig;
-}
-
-- (void)presentAtTime:(CFTimeInterval)presentationTime {
-    id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
-    if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
-        [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
-            if ([d conformsToProtocol:@protocol(CAMetalDrawable)]) {
-                ProcessNativePresentation((id<CAMetalDrawable>)d);
-            }
-        }];
-    } else {
-        ProcessNativePresentation(metalDrawable);
-    }
-    %orig(presentationTime);
-}
-
 - (void)presentAfterMinimumDuration:(CFTimeInterval)duration {
-    id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
-    if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
-        [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
-            if ([d conformsToProtocol:@protocol(CAMetalDrawable)]) {
-                ProcessNativePresentation((id<CAMetalDrawable>)d);
-            }
-        }];
-    } else {
-        ProcessNativePresentation(metalDrawable);
-    }
     // Uncap 60 FPS duration locks (~16.6ms) to 120 FPS duration (~8.33ms)
     CFTimeInterval uncapped = (duration >= 0.010) ? (1.0 / 120.0) : duration;
     %orig(uncapped);
