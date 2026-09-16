@@ -59,12 +59,14 @@ jobs:
             TARGET="$DEVICE_TARGET" \
             THEOS_PACKAGE_SCHEME=rootless \
             FINALPACKAGE=1
+          ls -la packages/
 
       - name: upload package
         uses: actions/upload-artifact@v4
         with:
           name: rootless-package
           path: packages/*.deb
+          if-no-files-found: error
 
   release:
     needs: build
