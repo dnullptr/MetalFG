@@ -205,8 +205,8 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)present {
     id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
     if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
-        [metalDrawable addPresentedHandler:^(id<CAMetalDrawable> d) {
-            ProcessNativePresentation(d);
+        [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
+            ProcessNativePresentation(metalDrawable);
         }];
     } else {
         ProcessNativePresentation(metalDrawable);
@@ -217,8 +217,8 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)presentAtTime:(CFTimeInterval)presentationTime {
     id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
     if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
-        [metalDrawable addPresentedHandler:^(id<CAMetalDrawable> d) {
-            ProcessNativePresentation(d);
+        [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
+            ProcessNativePresentation(metalDrawable);
         }];
     } else {
         ProcessNativePresentation(metalDrawable);
@@ -229,8 +229,8 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)presentAfterMinimumDuration:(CFTimeInterval)duration {
     id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
     if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
-        [metalDrawable addPresentedHandler:^(id<CAMetalDrawable> d) {
-            ProcessNativePresentation(d);
+        [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
+            ProcessNativePresentation(metalDrawable);
         }];
     } else {
         ProcessNativePresentation(metalDrawable);
@@ -245,12 +245,15 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 // ============================================================================
 // Hook: MTLCommandBuffer Presentations
 // ============================================================================
+@interface _MTLCommandBuffer : NSObject <MTLCommandBuffer>
+@end
+
 %hook _MTLCommandBuffer
 
 - (void)presentDrawable:(id<MTLDrawable>)drawable {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        [self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+        [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
             ProcessNativePresentation(metalDrawable);
         }];
     }
@@ -260,7 +263,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        [self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+        [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
             ProcessNativePresentation(metalDrawable);
         }];
     }
@@ -270,7 +273,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        [self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+        [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
             ProcessNativePresentation(metalDrawable);
         }];
     }
