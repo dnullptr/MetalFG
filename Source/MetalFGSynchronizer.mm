@@ -15,6 +15,8 @@
     uint64_t _nativeFrameCount;
     uint64_t _syntheticFrameCount;
     CFTimeInterval _lastStatsLogTime;
+    
+    BOOL _isBackgrounded;
 }
 
 @end
@@ -41,11 +43,51 @@
         _lastNativeOrientation = simd_quaternion(0.0f, 0.0f, 0.0f, 1.0f);
         _motionTracker = [MetalFGMotionTracker sharedTracker];
         _shouldStopThread = NO;
+        _isBackgrounded = NO;
         _nativeFrameCount = 0;
         _syntheticFrameCount = 0;
         _lastStatsLogTime = CACurrentMediaTime();
+        
+        // Listen to app lifecycle events to avoid GPU crashes in background
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleAppDidEnterBackground)
+                                                     name:UIApplicationDidEnterBackgroundNotification
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleAppDidBecomeActive)
+                                                     name:UIApplicationDidBecomeActiveNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)handleAppDidEnterBackground {
+    os_unfair_lock_lock(&_syncLock);
+    _isBackgrounded = YES;
+    if (_displayLink) {
+        _displayLink.paused = YES;
+    }
+    os_unfair_lock_unlock(&_syncLock);
+    
+    [_motionTracker stopTracking];
+    NSLog(@"[MetalFG] Application entered background. Suspended frame synchronizer.");
+}
+
+- (void)handleAppDidBecomeActive {
+    os_unfair_lock_lock(&_syncLock);
+    _isBackgrounded = NO;
+    if (_displayLink) {
+        _displayLink.paused = NO;
+    }
+    _lastNativeFrameTime = CACurrentMediaTime();
+    os_unfair_lock_unlock(&_syncLock);
+    
+    [_motionTracker startTracking];
+    NSLog(@"[MetalFG] Application became active. Resumed frame synchronizer.");
 }
 
 - (void)startSynchronizerWithLayer:(CAMetalLayer *)layer
@@ -110,7 +152,12 @@
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture
                        atTimestamp:(CFTimeInterval)timestamp
                        orientation:(simd_quatf)orientation {
-    if (!_isEnabled) return;
+    if (!_isEnabled || _isBackgrounded) return;
+    
+    // Ignore small HUD textures (e.g. CAPerfHud / MetalHUD)
+    if (texture.width < 600 || texture.height < 600) {
+        return;
+    }
     
     os_unfair_lock_lock(&_syncLock);
     _lastNativeFrameTime = timestamp;
@@ -126,91 +173,102 @@
 }
 
 - (void)onDisplayTick:(CADisplayLink *)link {
-    if (!_isEnabled) return;
-    
-    os_unfair_lock_lock(&_syncLock);
-    CFTimeInterval lastNative = _lastNativeFrameTime;
-    simd_quatf baseQuat = _lastNativeOrientation;
-    CAMetalLayer *layer = _activeLayer;
-    MetalFGWarper *warper = _warper;
-    os_unfair_lock_unlock(&_syncLock);
-    
-    if (!layer || !warper || !warper.isReady) return;
-    
-    CFTimeInterval now = link.timestamp;
-    CFTimeInterval elapsedSinceNative = now - lastNative;
-    
-    // ATW Scheduling Logic:
-    // Display refresh interval at 120Hz = ~8.33ms (0.00833s).
-    // Native 60 FPS frame interval = ~16.67ms (0.01667s).
-    //
-    // Case 1: Native frame presented recently (< 5.5ms ago).
-    // -> That native frame is currently taking this display cycle. Do NOT generate synthetic frame.
-    if (elapsedSinceNative < 0.0055) {
-        return;
-    }
-    
-    // Case 2: Native frame has not arrived in > 100ms (game paused, backgrounded, or static scene).
-    // -> Suspend synthetic generation to conserve battery and GPU power.
-    if (elapsedSinceNative > 0.100) {
-        return;
-    }
-    
-    // Case 3: GPU Backpressure guard:
-    // If the GPU is saturated or previous synthetic frames are still queued, drop this frame.
-    if ([warper isGpuBusy]) {
-        return;
-    }
-    
-    // Case 4: Intermediate VSYNC tick! (e.g. 5.5ms - 15.0ms since last native frame)
-    // Acquire an extra drawable for synthetic injection
-    id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
-    if (!syntheticDrawable) {
-        // Swapchain full or acquisition throttled; drop synthetic frame safely
-        return;
-    }
-    
-    // Sample predicted device orientation at the exact upcoming display presentation timestamp
-    CFTimeInterval targetPresentationTime = link.targetTimestamp;
-    simd_quatf targetQuat = [_motionTracker orientationAtTimestamp:targetPresentationTime];
-    
-    // Determine screen aspect ratio and orientation
-    CGSize drawableSize = layer.drawableSize;
-    float aspect = (drawableSize.height > 0.0f) ? (float)(drawableSize.width / drawableSize.height) : (16.0f / 9.0f);
-    
-    // Detect UI orientation (default landscape if game width > height)
-    UIInterfaceOrientation uiOrient = (drawableSize.width >= drawableSize.height) ?
-                                      UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationPortrait;
-    
-    // Compute rotational delta homography
-    simd_float3x3 H = [_motionTracker computeHomographyFromBase:baseQuat
-                                                       toTarget:targetQuat
-                                                    fovYDegrees:_fovYDegrees
-                                                    aspectRatio:aspect
-                                                    orientation:uiOrient];
-    simd_float3x3 invH = [_motionTracker invertMatrix3x3:H];
-    
-    // Render and present the warped synthetic frame
-    BOOL rendered = [warper renderSyntheticFrameToDrawable:syntheticDrawable
-                                          homographyMatrix:H
-                                       invHomographyMatrix:invH
-                                            targetTimeHint:targetPresentationTime];
-    
-    if (rendered) {
-        _syntheticFrameCount++;
-    }
-    
-    // Periodic FPS logging
-    CFTimeInterval statsNow = CACurrentMediaTime();
-    if (statsNow - _lastStatsLogTime >= 3.0) {
-        double duration = statsNow - _lastStatsLogTime;
-        double nativeFps = (double)_nativeFrameCount / duration;
-        double syntheticFps = (double)_syntheticFrameCount / duration;
-        NSLog(@"[MetalFG] Performance: Native: %.1f FPS | Synthetic: %.1f FPS | Total: %.1f FPS",
-              nativeFps, syntheticFps, nativeFps + syntheticFps);
-        _nativeFrameCount = 0;
-        _syntheticFrameCount = 0;
-        _lastStatsLogTime = statsNow;
+    @autoreleasepool {
+        if (!_isEnabled || _isBackgrounded) return;
+        
+        os_unfair_lock_lock(&_syncLock);
+        CFTimeInterval lastNative = _lastNativeFrameTime;
+        simd_quatf baseQuat = _lastNativeOrientation;
+        CAMetalLayer *layer = _activeLayer;
+        MetalFGWarper *warper = _warper;
+        os_unfair_lock_unlock(&_syncLock);
+        
+        if (!layer || !warper || !warper.isReady) return;
+        
+        // Ensure layer is of game-level resolution (not an overlay/HUD)
+        CGSize drawableSize = layer.drawableSize;
+        if (drawableSize.width < 600.0 || drawableSize.height < 600.0) {
+            return;
+        }
+        
+        // Application state check
+        if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+            return;
+        }
+        
+        CFTimeInterval now = link.timestamp;
+        CFTimeInterval elapsedSinceNative = now - lastNative;
+        
+        // ATW Scheduling Logic:
+        // Display refresh interval at 120Hz = ~8.33ms.
+        // Native 60 FPS frame interval = ~16.67ms.
+        //
+        // Case 1: Native frame presented recently (< 5.5ms ago).
+        // -> Native frame takes this display slot. Skip synthetic frame.
+        if (elapsedSinceNative < 0.0055) {
+            return;
+        }
+        
+        // Case 2: Native frame has not arrived in > 100ms (game paused, loading, or static scene).
+        // -> Suspend synthetic generation to conserve GPU power and prevent thermal throttle.
+        if (elapsedSinceNative > 0.100) {
+            return;
+        }
+        
+        // Case 3: GPU Backpressure guard:
+        // If GPU is currently busy drawing previous synthetic frame, drop this tick immediately.
+        if ([warper isGpuBusy]) {
+            return;
+        }
+        
+        // Case 4: Intermediate VSYNC tick! (e.g. 5.5ms - 15.0ms since last native frame)
+        // Safely acquire next drawable (allowsNextDrawableTimeout prevents deadlock)
+        id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
+        if (!syntheticDrawable || !syntheticDrawable.texture) {
+            return;
+        }
+        
+        // Sample predicted device orientation at the upcoming presentation timestamp
+        CFTimeInterval targetPresentationTime = link.targetTimestamp;
+        simd_quatf targetQuat = [_motionTracker orientationAtTimestamp:targetPresentationTime];
+        
+        // Determine screen aspect ratio
+        float aspect = (drawableSize.height > 0.0f) ? (float)(drawableSize.width / drawableSize.height) : (16.0f / 9.0f);
+        
+        // Detect UI orientation (default landscape for games)
+        UIInterfaceOrientation uiOrient = (drawableSize.width >= drawableSize.height) ?
+                                          UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationPortrait;
+        
+        // Compute rotational delta homography
+        simd_float3x3 H = [_motionTracker computeHomographyFromBase:baseQuat
+                                                           toTarget:targetQuat
+                                                        fovYDegrees:_fovYDegrees
+                                                        aspectRatio:aspect
+                                                        orientation:uiOrient];
+        simd_float3x3 invH = [_motionTracker invertMatrix3x3:H];
+        
+        // Render and present the warped synthetic frame
+        BOOL rendered = [warper renderSyntheticFrameToDrawable:syntheticDrawable
+                                              homographyMatrix:H
+                                           invHomographyMatrix:invH
+                                                targetTimeHint:targetPresentationTime];
+        
+        if (rendered) {
+            _syntheticFrameCount++;
+        }
+        
+        // Periodic FPS logging
+        CFTimeInterval statsNow = CACurrentMediaTime();
+        if (statsNow - _lastStatsLogTime >= 3.0) {
+            double duration = statsNow - _lastStatsLogTime;
+            double nativeFps = (double)_nativeFrameCount / duration;
+            double syntheticFps = (double)_syntheticFrameCount / duration;
+            NSLog(@"[MetalFG] Performance: Native: %.1f FPS | Synthetic: %.1f FPS | Total: %.1f FPS",
+                  nativeFps, syntheticFps, nativeFps + syntheticFps);
+            _nativeFrameCount = 0;
+            _syntheticFrameCount = 0;
+            _lastStatsLogTime = statsNow;
+        }
     }
 }
 

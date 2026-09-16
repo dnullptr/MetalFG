@@ -231,7 +231,7 @@ static const MetalFGVertex kQuadVertices[6] = {
 - (void)captureBaseTexture:(id<MTLTexture>)sourceTexture
              withTimestamp:(CFTimeInterval)timestamp
                orientation:(simd_quatf)orientation {
-    if (!sourceTexture) return;
+    if (!sourceTexture || sourceTexture.width < 600 || sourceTexture.height < 600) return;
     
     [self ensureTextureStorageForSource:sourceTexture];
     
@@ -351,7 +351,7 @@ static const MetalFGVertex kQuadVertices[6] = {
 }
 
 - (BOOL)isGpuBusy {
-    return _inFlightGpuFrames.load() >= 2;
+    return _inFlightGpuFrames.load() >= 1;
 }
 
 @end
