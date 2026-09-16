@@ -203,17 +203,38 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 %hook CAMetalDrawable
 
 - (void)present {
-    ProcessNativePresentation((id<CAMetalDrawable>)self);
+    id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
+    if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
+        [metalDrawable addPresentedHandler:^(id<CAMetalDrawable> d) {
+            ProcessNativePresentation(d);
+        }];
+    } else {
+        ProcessNativePresentation(metalDrawable);
+    }
     %orig;
 }
 
 - (void)presentAtTime:(CFTimeInterval)presentationTime {
-    ProcessNativePresentation((id<CAMetalDrawable>)self);
+    id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
+    if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
+        [metalDrawable addPresentedHandler:^(id<CAMetalDrawable> d) {
+            ProcessNativePresentation(d);
+        }];
+    } else {
+        ProcessNativePresentation(metalDrawable);
+    }
     %orig(presentationTime);
 }
 
 - (void)presentAfterMinimumDuration:(CFTimeInterval)duration {
-    ProcessNativePresentation((id<CAMetalDrawable>)self);
+    id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
+    if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
+        [metalDrawable addPresentedHandler:^(id<CAMetalDrawable> d) {
+            ProcessNativePresentation(d);
+        }];
+    } else {
+        ProcessNativePresentation(metalDrawable);
+    }
     // Uncap 60 FPS duration locks (~16.6ms) to 120 FPS duration (~8.33ms)
     CFTimeInterval uncapped = (duration >= 0.010) ? (1.0 / 120.0) : duration;
     %orig(uncapped);
@@ -228,21 +249,30 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 
 - (void)presentDrawable:(id<MTLDrawable>)drawable {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
-        ProcessNativePresentation((id<CAMetalDrawable>)drawable);
+        id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
+        [self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+            ProcessNativePresentation(metalDrawable);
+        }];
     }
     %orig(drawable);
 }
 
 - (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
-        ProcessNativePresentation((id<CAMetalDrawable>)drawable);
+        id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
+        [self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+            ProcessNativePresentation(metalDrawable);
+        }];
     }
     %orig(drawable, presentationTime);
 }
 
 - (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
-        ProcessNativePresentation((id<CAMetalDrawable>)drawable);
+        id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
+        [self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+            ProcessNativePresentation(metalDrawable);
+        }];
     }
     // Uncap 60 FPS duration locks (~16.6ms) to 120 FPS duration (~8.33ms)
     CFTimeInterval uncapped = (duration >= 0.010) ? (1.0 / 120.0) : duration;

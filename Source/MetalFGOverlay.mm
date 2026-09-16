@@ -56,7 +56,27 @@
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w != self.view.window && w.rootViewController && w.rootViewController != self) {
+            return [w.rootViewController supportedInterfaceOrientations];
+        }
+    }
+    #pragma clang diagnostic pop
     return UIInterfaceOrientationMaskAll;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w != self.view.window && w.rootViewController && w.rootViewController != self) {
+            return [w.rootViewController preferredInterfaceOrientationForPresentation];
+        }
+    }
+    #pragma clang diagnostic pop
+    return UIInterfaceOrientationLandscapeRight;
 }
 
 - (BOOL)prefersStatusBarHidden {

@@ -68,9 +68,11 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     float minBorderDist = min(distToBorderX, distToBorderY);
     
     // Smoothstep edge falloff to avoid hard pixel jaggedness at the warped boundary
-    float fadeWidth = uniforms.edgeFadeParams.x; // Default ~0.02 (2% border fade)
-    if (fadeWidth < 0.0001) fadeWidth = 0.02;
-    float edgeFade = smoothstep(0.0, fadeWidth, minBorderDist);
+    float fadeWidth = uniforms.edgeFadeParams.x;
+    float edgeFade = 1.0;
+    if (fadeWidth > 0.0001) {
+        edgeFade = smoothstep(0.0, fadeWidth, minBorderDist);
+    }
     
     // High-quality bilinear sampler with edge clamping
     constexpr sampler linearSampler(coord::normalized,

@@ -18,6 +18,7 @@
     CFTimeInterval _lastStatsLogTime;
     
     BOOL _isBackgrounded;
+    BOOL _hasInjectedForCurrentNativeFrame;
 }
 
 @end
@@ -45,6 +46,7 @@
         _motionTracker = [MetalFGMotionTracker sharedTracker];
         _shouldStopThread = NO;
         _isBackgrounded = NO;
+        _hasInjectedForCurrentNativeFrame = NO;
         _nativeFrameCount = 0;
         _syntheticFrameCount = 0;
         _lastStatsLogTime = CACurrentMediaTime();
@@ -169,6 +171,7 @@
     _lastNativeFrameTime = timestamp;
     _lastNativeOrientation = orientation;
     _nativeFrameCount++;
+    _hasInjectedForCurrentNativeFrame = NO;
     MetalFGWarper *currentWarper = _warper;
     os_unfair_lock_unlock(&_syncLock);
     
@@ -202,12 +205,21 @@
         
         os_unfair_lock_lock(&_syncLock);
         CFTimeInterval lastNative = _lastNativeFrameTime;
-        simd_quatf baseQuat = _lastNativeOrientation;
+        BOOL alreadyInjected = _hasInjectedForCurrentNativeFrame;
         CAMetalLayer *layer = _activeLayer;
         MetalFGWarper *warper = _warper;
         os_unfair_lock_unlock(&_syncLock);
         
         if (!layer || !warper || !warper.isReady) return;
+        
+        // STRICT 1:1 FRAME PACING:
+        // Enforce at most 1 synthetic frame per native frame.
+        // If we already generated an interpolated frame for the current native frame,
+        // yield this refresh cycle completely so the game's render thread has exclusive,
+        // uncontended access to the swapchain.
+        if (alreadyInjected) {
+            return;
+        }
         
         // Ignore HUD/sub-layers smaller than 250x150
         CGSize drawableSize = layer.drawableSize;
@@ -219,13 +231,13 @@
         CFTimeInterval now = CACurrentMediaTime();
         CFTimeInterval elapsedSinceNative = now - lastNative;
         
-        // ATW Pacing Logic:
+        // Frame Generation Pacing Logic:
         // On 120Hz ProMotion: refresh interval = ~8.33ms (0.00833s).
         // Native 60 FPS interval = ~16.67ms (0.01667s).
         //
-        // Case 1: Native frame presented very recently (< 4.5ms ago).
+        // Case 1: Native frame presented very recently (< 4.0ms ago).
         // That native frame is occupying the current hardware refresh cycle. Skip synthetic injection.
-        if (elapsedSinceNative < 0.0045) {
+        if (elapsedSinceNative < 0.0040) {
             return;
         }
         
@@ -241,33 +253,22 @@
             return;
         }
         
-        // Case 4: Intermediate VSYNC tick! (e.g. 4.5ms - 15.0ms since last native frame)
+        // Case 4: Intermediate VSYNC tick! (e.g. 4.0ms - 15.0ms since last native frame)
         // Safely acquire next drawable (allowsNextDrawableTimeout prevents deadlock)
         id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
         if (!syntheticDrawable || !syntheticDrawable.texture) {
             return;
         }
         
-        // Sample predicted device orientation at the upcoming presentation timestamp
+        // Sample predicted presentation timestamp
         CFTimeInterval targetPresentationTime = link.targetTimestamp;
-        simd_quatf targetQuat = [_motionTracker orientationAtTimestamp:targetPresentationTime];
         
-        // Determine screen aspect ratio
-        float aspect = (drawableSize.height > 0.0f) ? (float)(drawableSize.width / drawableSize.height) : (16.0f / 9.0f);
+        // Handheld Frame Generation:
+        // Identity reprojection matrix (flat 1:1, NO physical gyro tilt/shear)
+        simd_float3x3 H = matrix_identity_float3x3;
+        simd_float3x3 invH = matrix_identity_float3x3;
         
-        // Detect UI orientation (default landscape for games)
-        UIInterfaceOrientation uiOrient = (drawableSize.width >= drawableSize.height) ?
-                                          UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationPortrait;
-        
-        // Compute rotational delta homography
-        simd_float3x3 H = [_motionTracker computeHomographyFromBase:baseQuat
-                                                           toTarget:targetQuat
-                                                        fovYDegrees:_fovYDegrees
-                                                        aspectRatio:aspect
-                                                        orientation:uiOrient];
-        simd_float3x3 invH = [_motionTracker invertMatrix3x3:H];
-        
-        // Render and present the warped synthetic frame
+        // Render and present the synthetic frame
         BOOL rendered = [warper renderSyntheticFrameToDrawable:syntheticDrawable
                                               homographyMatrix:H
                                            invHomographyMatrix:invH
@@ -275,6 +276,9 @@
         
         if (rendered) {
             _syntheticFrameCount++;
+            os_unfair_lock_lock(&_syncLock);
+            _hasInjectedForCurrentNativeFrame = YES;
+            os_unfair_lock_unlock(&_syncLock);
         }
     }
 }

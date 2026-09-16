@@ -58,8 +58,10 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float distToBorderY = min(v, 1.0 - v);\n"
 "    float minBorderDist = min(distToBorderX, distToBorderY);\n"
 "    float fadeWidth = uniforms.edgeFadeParams.x;\n"
-"    if (fadeWidth < 0.0001) fadeWidth = 0.02;\n"
-"    float edgeFade = smoothstep(0.0, fadeWidth, minBorderDist);\n"
+"    float edgeFade = 1.0;\n"
+"    if (fadeWidth > 0.0001) {\n"
+"        edgeFade = smoothstep(0.0, fadeWidth, minBorderDist);\n"
+"    }\n"
 "    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);\n"
 "    float4 sampledColor = sourceTexture.sample(linearSampler, float2(u, v));\n"
 "    sampledColor.rgb *= edgeFade;\n"
@@ -117,7 +119,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         _hasValidBaseFrame = NO;
         _inFlightGpuFrames = 0;
         _debugTintEnabled = NO;
-        _edgeFadeWidth = 0.025f; // 2.5% viewport edge fade
+        _edgeFadeWidth = 0.0f; // 0.0f: full edge-to-edge reprojection without vignette
         
         _commandQueue = [_device newCommandQueue];
         _commandQueue.label = @"com.metalfg.warperqueue";
