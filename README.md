@@ -126,8 +126,7 @@ make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 
 The resulting package will be generated in the `packages/` directory:
 ```
-packages/com.developer.metalfg_1.0.0_iphoneos-arm64.deb
-packages/com.dnullptr.metalfg_1.0.0_iphoneos-arm64.deb
+packages/com.dnullptr.metalfg_1.0.1_iphoneos-arm64.deb
 ```
 
 ---
@@ -138,11 +137,9 @@ packages/com.dnullptr.metalfg_1.0.0_iphoneos-arm64.deb
 Transfer and install the package onto your Dopamine / Palera1n jailbroken device:
 
 ```bash
-scp -P 2222 packages/com.developer.metalfg_1.0.0_iphoneos-arm64.deb root@<DEVICE_IP>:/var/mobile/
-scp -P 2222 packages/com.dnullptr.metalfg_1.0.0_iphoneos-arm64.deb root@<DEVICE_IP>:/var/mobile/
+scp -P 2222 packages/com.dnullptr.metalfg_1.0.1_iphoneos-arm64.deb root@<DEVICE_IP>:/var/mobile/
 ssh -p 2222 root@<DEVICE_IP>
-dpkg -i /var/mobile/com.developer.metalfg_1.0.0_iphoneos-arm64.deb
-dpkg -i /var/mobile/com.dnullptr.metalfg_1.0.0_iphoneos-arm64.deb
+dpkg -i /var/mobile/com.dnullptr.metalfg_1.0.1_iphoneos-arm64.deb
 ```
 
 ### 2. Verify Operation & Real-Time Logs
