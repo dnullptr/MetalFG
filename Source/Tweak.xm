@@ -206,7 +206,9 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
     if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
         [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
-            ProcessNativePresentation(metalDrawable);
+            if ([d conformsToProtocol:@protocol(CAMetalDrawable)]) {
+                ProcessNativePresentation((id<CAMetalDrawable>)d);
+            }
         }];
     } else {
         ProcessNativePresentation(metalDrawable);
@@ -218,7 +220,9 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
     if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
         [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
-            ProcessNativePresentation(metalDrawable);
+            if ([d conformsToProtocol:@protocol(CAMetalDrawable)]) {
+                ProcessNativePresentation((id<CAMetalDrawable>)d);
+            }
         }];
     } else {
         ProcessNativePresentation(metalDrawable);
@@ -230,7 +234,9 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)self;
     if ([metalDrawable respondsToSelector:@selector(addPresentedHandler:)]) {
         [metalDrawable addPresentedHandler:^(id<MTLDrawable> d) {
-            ProcessNativePresentation(metalDrawable);
+            if ([d conformsToProtocol:@protocol(CAMetalDrawable)]) {
+                ProcessNativePresentation((id<CAMetalDrawable>)d);
+            }
         }];
     } else {
         ProcessNativePresentation(metalDrawable);
