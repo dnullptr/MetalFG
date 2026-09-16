@@ -160,7 +160,7 @@
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture
                        atTimestamp:(CFTimeInterval)timestamp
                        orientation:(simd_quatf)orientation {
-    if (!_isEnabled || _isBackgrounded) return;
+    if (_isBackgrounded) return;
     
     // Ignore small HUD textures (e.g. CAPerfHud / MetalHUD: typically < 250x150)
     if (texture.width < 250 || texture.height < 150) {
@@ -173,17 +173,18 @@
     _nativeFrameCount++;
     _hasInjectedForCurrentNativeFrame = NO;
     MetalFGWarper *currentWarper = _warper;
+    BOOL enabled = _isEnabled;
     os_unfair_lock_unlock(&_syncLock);
     
-    // Copy the rendered game frame into double-buffered cache
-    if (currentWarper && texture) {
+    // Copy the rendered game frame into double-buffered cache only if FG is enabled
+    if (enabled && currentWarper && texture) {
         [currentWarper captureBaseTexture:texture withTimestamp:timestamp orientation:orientation];
     }
 }
 
 - (void)onDisplayTick:(CADisplayLink *)link {
     @autoreleasepool {
-        if (!_isEnabled || _isBackgrounded) return;
+        if (_isBackgrounded) return;
         
         // Periodic FPS logging & On-Screen Overlay update (every 1.0s, evaluated on every tick)
         CFTimeInterval statsNow = CACurrentMediaTime();
@@ -201,6 +202,11 @@
             _nativeFrameCount = 0;
             _syntheticFrameCount = 0;
             _lastStatsLogTime = statsNow;
+        }
+        
+        // If Frame Generation toggle is OFF, skip synthetic frame injection completely
+        if (!_isEnabled) {
+            return;
         }
         
         os_unfair_lock_lock(&_syncLock);

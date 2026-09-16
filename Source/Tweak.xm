@@ -135,31 +135,6 @@ static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
 %end
 
 // ============================================================================
-// Hook: CADisplayLink to unlock 120Hz refresh rates in games
-// ============================================================================
-%hook CADisplayLink
-
-- (void)setPreferredFramesPerSecond:(NSInteger)fps {
-    %orig(120);
-}
-
-- (void)setPreferredFrameRateRange:(CAFrameRateRange)range {
-    range.minimum = 60.0f;
-    range.preferred = 120.0f;
-    range.maximum = 120.0f;
-    %orig(range);
-}
-
-- (void)setFrameInterval:(NSInteger)interval {
-    %orig(1);
-    if ([self respondsToSelector:@selector(setPreferredFramesPerSecond:)]) {
-        self.preferredFramesPerSecond = 120;
-    }
-}
-
-%end
-
-// ============================================================================
 // Helper: Process Native Frame Presentation
 // ============================================================================
 static char kMetalFGProcessedKey;
@@ -216,9 +191,9 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 %hook CAMetalDrawable
 
 - (void)presentAfterMinimumDuration:(CFTimeInterval)duration {
-    // Uncap 60 FPS duration locks (~16.6ms) to 120 FPS duration (~8.33ms)
-    CFTimeInterval uncapped = (duration >= 0.010) ? (1.0 / 120.0) : duration;
-    %orig(uncapped);
+    // If Frame Generation is active, divide minimum duration by 2 so synthetic frames can present at the midpoint
+    CFTimeInterval durationCap = [MetalFGSynchronizer sharedSynchronizer].isEnabled ? (duration / 2.0) : duration;
+    %orig(durationCap);
 }
 
 %end
@@ -258,9 +233,9 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
             ProcessNativePresentation(metalDrawable);
         }];
     }
-    // Uncap 60 FPS duration locks (~16.6ms) to 120 FPS duration (~8.33ms)
-    CFTimeInterval uncapped = (duration >= 0.010) ? (1.0 / 120.0) : duration;
-    %orig(drawable, uncapped);
+    // If Frame Generation is active, divide minimum duration by 2 so synthetic frames can present at the midpoint
+    CFTimeInterval durationCap = [MetalFGSynchronizer sharedSynchronizer].isEnabled ? (duration / 2.0) : duration;
+    %orig(drawable, durationCap);
 }
 
 %end

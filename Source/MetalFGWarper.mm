@@ -278,8 +278,12 @@ static const MetalFGVertex kQuadVertices[6] = {
     // Tag the synthetic drawable to prevent recursive presentation hooking
     objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // Present synthetic drawable directly upon render pass completion
-    [cmdBuffer presentDrawable:targetDrawable];
+    // Present synthetic drawable at the exact hardware display timestamp hint
+    if (targetTimeHint > 0.0) {
+        [cmdBuffer presentDrawable:targetDrawable atTime:targetTimeHint];
+    } else {
+        [cmdBuffer presentDrawable:targetDrawable];
+    }
     
     _inFlightGpuFrames.fetch_add(1);
     __weak MetalFGWarper *weakSelf = self;

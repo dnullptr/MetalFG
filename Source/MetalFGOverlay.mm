@@ -1,4 +1,5 @@
 #import "../Headers/MetalFGOverlay.h"
+#import "../Headers/MetalFGSynchronizer.h"
 #import <UIKit/UIKit.h>
 #import <math.h>
 
@@ -146,14 +147,22 @@
         _fpsLabel.adjustsFontSizeToFitWidth = YES;
         [_pillView addSubview:_fpsLabel];
         
-        // Gestures: Drag to move, Tap to toggle compact mode
+        // Gestures: Drag to move, Single-Tap to toggle FG ON/OFF, Double-Tap to minimize/expand
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] init];
         [pan addTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
         
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] init];
-        [tap addTarget:self action:@selector(handleTap:)];
-        [self addGestureRecognizer:tap];
+        UITapGestureRecognizer *singleTap = [[UITapGestureRecognizer alloc] init];
+        [singleTap addTarget:self action:@selector(handleSingleTap:)];
+        singleTap.numberOfTapsRequired = 1;
+        [self addGestureRecognizer:singleTap];
+        
+        UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] init];
+        [doubleTap addTarget:self action:@selector(handleDoubleTap:)];
+        doubleTap.numberOfTapsRequired = 2;
+        [self addGestureRecognizer:doubleTap];
+        
+        [singleTap requireGestureRecognizerToFail:doubleTap];
     }
     return self;
 }
@@ -175,7 +184,29 @@
     [recognizer setTranslation:CGPointZero inView:superview];
 }
 
-- (void)handleTap:(UITapGestureRecognizer *)recognizer {
+- (void)handleSingleTap:(UITapGestureRecognizer *)recognizer {
+    MetalFGSynchronizer *sync = [MetalFGSynchronizer sharedSynchronizer];
+    sync.isEnabled = !sync.isEnabled;
+    
+    // Physical haptic feedback on toggle
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [feedback prepare];
+    [feedback impactOccurred];
+    
+    [UIView animateWithDuration:0.2 animations:^{
+        if (sync.isEnabled) {
+            self->_statusDot.backgroundColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:1.0];
+            self->_pillView.layer.borderColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:0.85].CGColor;
+            self->_fpsLabel.text = @"⚡ FG: Resuming...";
+        } else {
+            self->_statusDot.backgroundColor = [UIColor colorWithRed:0.65 green:0.65 blue:0.65 alpha:1.0];
+            self->_pillView.layer.borderColor = [UIColor colorWithRed:0.55 green:0.55 blue:0.55 alpha:0.7].CGColor;
+            self->_fpsLabel.text = @"⏸ FG: OFF (Native)";
+        }
+    }];
+}
+
+- (void)handleDoubleTap:(UITapGestureRecognizer *)recognizer {
     _isMinimized = !_isMinimized;
     
     [UIView animateWithDuration:0.25 animations:^{
@@ -254,6 +285,15 @@
                syntheticFPS:(double)syntheticFps {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self show];
+        
+        MetalFGSynchronizer *sync = [MetalFGSynchronizer sharedSynchronizer];
+        if (!sync.isEnabled) {
+            // Frame Generation is toggled OFF
+            self->_fpsLabel.text = [NSString stringWithFormat:@"⏸ FG: OFF (Native: %.0f)", nativeFps];
+            self->_statusDot.backgroundColor = [UIColor colorWithRed:0.65 green:0.65 blue:0.65 alpha:1.0];
+            self->_pillView.layer.borderColor = [UIColor colorWithRed:0.55 green:0.55 blue:0.55 alpha:0.7].CGColor;
+            return;
+        }
         
         double totalFps = nativeFps + syntheticFps;
         if (syntheticFps > 5.0) {
