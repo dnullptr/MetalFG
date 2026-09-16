@@ -9,6 +9,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = MetalFG
 
 MetalFG_FILES = Source/Tweak.xm \
+                Source/TouchTracker.mm \
                 Source/CoreMotionTracker.mm \
                 Source/MetalFGWarper.mm \
                 Source/MetalFGSynchronizer.mm \

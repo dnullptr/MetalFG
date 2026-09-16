@@ -1,8 +1,11 @@
-# MetalFG: Low-Latency Frame Generation & Asynchronous Timewarp (ATW) for iOS 16 (Rootless)
+# MetalFG: Real-Time GPU Motion-Interpolated Frame Generation for iOS 16 (Rootless)
 
-**MetalFG** is a Proof of Concept (PoC) iOS tweak designed for rootless jailbreak environments (Dopamine, Palera1n on iOS 16.x) targeting 120Hz ProMotion devices (iPhone 13 Pro/Max, iPhone 14 Pro/Max, iPhone 15 Pro/Max, and iPad Pro). 
+**MetalFG** is a high-performance iOS tweak for rootless jailbreak environments (Dopamine, Palera1n on iOS 16.x) targeting 120Hz ProMotion devices (iPhone 13 Pro/Max, iPhone 14 Pro/Max, iPhone 15 Pro/Max, and iPad Pro).
 
-It intercepts the Metal graphics pipeline of native games, samples real-time 200Hz device motion data via `CoreMotion`, computes a 3D perspective homography matrix ($H = K \cdot R^T \cdot K^{-1}$), and synthesizes intermediate reprojected frames between native game frames to double the perceived frame rate from 60 FPS to a fluid 120 FPS with near-zero motion-to-photon latency.
+It intercepts the Metal graphics pipeline of 60 FPS capped 3D games (such as Genshin Impact) and synthesizes fluid intermediate frames using a dual-engine motion interpolation pipeline:
+1. **GPU Block Motion Estimation (BME) Compute Shader:** Screen-space optical flow running directly on Apple Silicon GPU.
+2. **Static UI Masking:** Automatically classifies stationary HUD elements (minimap, health bars, attack buttons, dialogue) to prevent text smearing or distortion.
+3. **Touch-Driven Camera Velocity Prior:** Samples finger drag speed on the touchscreen to provide instant camera rotational velocity with zero input lag.
 
 ---
 
@@ -18,8 +21,8 @@ It intercepts the Metal graphics pipeline of native games, samples real-time 200
                        +------------------v-------------------+
                        |        MetalFG Tweak Hook            |
                        | - Intercepts CAMetalDrawable         |
-                       | - Blits texture to double-buffer     |
-                       | - Records timestamp & attitude q0    |
+                       | - Double-buffers native frames       |
+                       | - Samples touch swipe velocity       |
                        +------------------+-------------------+
                                           |
                      +--------------------+--------------------+
@@ -30,21 +33,21 @@ It intercepts the Metal graphics pipeline of native games, samples real-time 200
         [ Native Frame N Shown ]                 [ MetalFGSynchronizer Tick ]
                                                                |
                                               +----------------v----------------+
-                                              | CoreMotion High-Freq Tracker    |
-                                              | - Samples attitude q1 @ 200Hz   |
-                                              | - Extrapolates to display VSYNC |
-                                              | - Δq = q1 * q0^(-1)             |
+                                              | Touch Camera Velocity Prior     |
+                                              | - Measures swipe velocity Δu,Δv |
                                               +----------------+----------------+
                                                                |
                                               +----------------v----------------+
-                                              | Camera Homography Generator     |
-                                              | H = K * R(Δq)^T * K^(-1)        |
+                                              | GPU Block Motion Estimation     |
+                                              | - 80x45 macroblock grid         |
+                                              | - Compares Frame N-1 and N      |
+                                              | - Static UI detection & lock    |
                                               +----------------+----------------+
                                                                |
                                               +----------------v----------------+
-                                              | MetalFGWarper Reprojection Pass |
-                                              | - Inverse Homography Sampler    |
-                                              | - Bilinear Clamping + Edge Fade |
+                                              | MetalFGWarper Motion Pass       |
+                                              | - Forward motion extrapolation  |
+                                              | - Preserves UI text sharpness   |
                                               | - Encodes to CAMetalDrawable    |
                                               +----------------+----------------+
                                                                |
@@ -56,123 +59,43 @@ It intercepts the Metal graphics pipeline of native games, samples real-time 200
 
 ## Technical Details
 
-### 1. Mathematics of Asynchronous Timewarp (ATW)
-When a player tilts, pitches, or turns the device, the camera orientation changes. For purely rotational camera motion (dominant in first-person and third-person mobile games):
-- **Intrinsic Camera Matrix ($K$)**: Defined in Normalized Device Coordinates (NDC $[-1, 1]$) with vertical field-of-view $\theta$ and aspect ratio $A$:
-  $$f_y = \frac{1}{\tan(\theta / 2)}, \quad f_x = \frac{f_y}{A}, \quad K = \begin{pmatrix} f_x & 0 & 0 \\ 0 & f_y & 0 \\ 0 & 0 & 1 \end{pmatrix}$$
-- **Camera Rotational Delta ($R$)**: Computed from the relative quaternion $\Delta q = q_{\text{target}} \cdot q_{\text{base}}^{-1}$ adjusted for display orientation (Portrait, Landscape Left, Landscape Right).
-- **Homography Matrix ($H$)**: Maps target frame pixels back to the source frame:
-  $$H = K \cdot R^T \cdot K^{-1}$$
-- **Fragment Shader Sampling**:
-  Given target pixel $\mathbf{x}_t = (x, y, 1)^T$, the source location is:
-  $$\mathbf{x}_s \sim H \mathbf{x}_t \implies u = \frac{x_s + 1}{2}, \quad v = \frac{1 - y_s}{2}$$
+### 1. GPU Block Motion Estimation (BME)
+- Analyzes consecutive native frames on an $80\times45$ macroblock grid on the GPU.
+- Each block evaluates pixel luminance deltas across a localized search window centered on the touch velocity prior.
+- Generates a normalized 2D motion vector field texture (`RG16Float`).
 
-### 2. Swapchain Starvation Prevention
-- Standard game engines configure `CAMetalLayer.maximumDrawableCount = 2` (double buffering). Attempting to acquire an extra drawable (`nextDrawable`) for synthetic frame injection while the game holds a drawable will deadlock the render thread.
-- `MetalFG` hooks `CAMetalLayer` to enforce `maximumDrawableCount = 3` (triple buffering), ensuring continuous headroom for synthetic frame submission without stalling the game engine.
-- A backpressure guard drops synthetic frames immediately if GPU queue depth reaches $\ge 2$.
+### 2. Static UI Masking
+- Traditional frame generation often smears text, health bars, and minimaps.
+- MetalFG evaluates difference metrics across block centers: if pixel differences between frames are below threshold $\epsilon$, the block is tagged as **Static UI**.
+- UI pixels receive a $(0, 0)$ displacement vector, guaranteeing that on-screen text, menus, and controls remain 100% sharp and unwarped.
 
-### 3. Edge Guard & Vignette
-- Extreme device rotations expose regions outside the original camera frustum (disocclusion).
-- `Shaders.metal` applies a smooth Hermite interpolation (`smoothstep`) edge-fade to black within the outer 2.5% viewport boundary, preventing pixel streaking along screen edges.
+### 3. Touch-Driven Camera Velocity Prior
+- In mobile 3D action games, the vast majority of screen movement comes from thumb swipes rotating the camera.
+- `MetalFGTouchTracker` intercepts touch movement events via `UIWindow sendEvent:` to calculate smooth camera angular velocity.
+- This gives the GPU search kernel an immediate, accurate motion prior with zero latency penalty.
 
-### 4. Zero-Dependency Shader Delivery
-- `Shaders.metal` is automatically compiled to `default.metallib` via `xcrun` during package staging.
-- `MetalFGWarper.mm` also contains an embedded, runtime-compiled MSL fallback. If App Sandbox restrictions or missing paths prevent loading the `.metallib`, the tweak compiles the shader directly in memory via `[device newLibraryWithSource:options:error:]`.
+### 4. Triple Buffering & Backpressure Guard
+- Automatically configures `CAMetalLayer.maximumDrawableCount = 3` to prevent swapchain starvation.
+- Drops synthetic frames immediately if GPU queue depth reaches $\ge 2$, prioritizing the native game engine.
 
 ---
 
-## Project Structure
+## Floating Status HUD
 
-```
-MetalFG/
-├── Makefile                     # Theos rootless build configuration
-├── control                      # Debian package metadata
-├── MetalFG.plist                # Substrate filter (UIKit applications)
-├── README.md                    # Documentation
-├── Headers/
-│   ├── ShaderTypes.h            # Shared vertex, uniform, and buffer structures
-│   ├── CoreMotionTracker.h      # High-frequency 200Hz orientation tracking & math
-│   ├── MetalFGWarper.h          # Metal pipeline state, texture double-buffer & render encoder
-│   └── MetalFGSynchronizer.h    # 120Hz CADisplayLink scheduler & frame pacing
-├── Shaders/
-│   └── Shaders.metal            # Metal Shading Language ATW vertex & fragment shaders
-└── Source/
-    ├── CoreMotionTracker.mm     # Sensor fusion, SLERP, and homography implementation
-    ├── MetalFGWarper.mm         # Pipeline compilation, GPU blit cache, and draw dispatch
-    ├── MetalFGSynchronizer.mm   # CADisplayLink ProMotion synchronizer loop
-    └── Tweak.xm                 # Logos hooks for CAMetalLayer, CAMetalDrawable, and MTLCommandBuffer
-```
+MetalFG includes a non-intrusive on-screen floating pill HUD:
+- **Real FPS Monitoring:** Displays true native FPS and generated synthetic FPS in real time (e.g. `⚡ FG: 120 (60+60)`).
+- **Single Tap:** Instantly toggles Frame Generation **ON / OFF** with tactile haptic feedback (`⏸ FG: OFF (Native: 60)`).
+- **Double Tap:** Minimizes badge into a compact 36x36 floating dot.
+- **Drag:** Freely reposition anywhere on screen.
 
 ---
 
 ## Build & Installation
 
-### Prerequisites
-1. **Theos**: Installed and configured with `THEOS_PACKAGE_SCHEME = rootless`.
-2. **iOS 16 SDK**: Placed in `$THEOS/sdks/iPhoneOS16.5.sdk` (or latest iOS 16 SDK).
-3. **macOS / Linux / iOS host**: Clang with arm64/arm64e support.
-
-### Building the Tweak
-Run the following commands in the project root:
-
+### Building the Tweak (Theos)
 ```bash
-# Clean previous builds
 make clean
-
-# Compile and package for iOS 16 Rootless
 make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 ```
 
-The resulting package will be generated in the `packages/` directory:
-```
-packages/com.dnullptr.metalfg_1.0.4_iphoneos-arm64.deb
-```
-
----
-
-## Testing & Verification
-
-### 1. Installation
-
-Transfer and install the package onto your Dopamine / Palera1n jailbroken device:
-
-```bash
-scp -P 2222 packages/com.dnullptr.metalfg_1.0.4_iphoneos-arm64.deb root@<DEVICE_IP>:/var/mobile/
-ssh -p 2222 root@<DEVICE_IP>
-dpkg -i /var/mobile/com.dnullptr.metalfg_1.0.4_iphoneos-arm64.deb
-```
-
-### 2. Verify Operation & Real-Time Logs
-Filter tweak logs via `oslog` or `log stream`:
-
-```bash
-log stream --level debug --predicate 'sender contains "MetalFG" or eventMessage contains "MetalFG"'
-```
-
-Expected log output:
-```
-[MetalFG] Initializing MetalFG (Asynchronous Timewarp Frame Generation)...
-[MetalFG] CoreMotionTracker started at 200.0 Hz.
-[MetalFG] MetalFGWarper initialized successfully for pixelFormat 80.
-[MetalFG] Synchronizer started on dedicated 120Hz display link thread.
-[MetalFG] Performance: Native: 60.1 FPS | Synthetic: 59.9 FPS | Total: 120.0 FPS
-```
-
-### 3. Visual Verification (Debug Tint Overlay)
-To visually distinguish synthetic frames from native game frames, enable the debug tint overlay:
-
-```bash
-defaults write /var/jb/var/mobile/Library/Preferences/com.metalfg.prefs.plist debugTint -bool true
-defaults write /var/jb/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist debugTint -bool true
-```
-
-*When enabled, synthetic frames will render with a subtle translucent green tint, allowing you to instantly observe the alternating 60 FPS native / 60 FPS synthetic frames at 120Hz.*
-
-### 4. Customizing Field of View (FOV)
-If a specific game uses a narrower or wider camera FOV:
-```bash
-defaults write /var/jb/var/mobile/Library/Preferences/com.metalfg.prefs.plist fovY -float 85.0
-defaults write /var/jb/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist fovY -float 85.0
-```
-
+Generated package: `packages/com.dnullptr.metalfg_1.0.8_iphoneos-arm64.deb`.

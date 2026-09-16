@@ -15,14 +15,37 @@ typedef struct {
     simd_float2 texCoords;  // Metal Texture Coordinates (UV): [0, 1]
 } MetalFGVertex;
 
+// Uniforms for Block Motion Estimation compute kernel (32 bytes, 16-byte aligned)
+typedef struct {
+    simd_float2 touchVelocity;  // Normalized UV velocity delta from touch tracking
+    simd_uint2 gridDimensions;  // Number of blocks (width, height) e.g. (80, 45)
+    float uiThreshold;          // Static UI luminance threshold (e.g. 0.035)
+    float searchRadius;         // Search radius in UV space (e.g. 0.04)
+    float pad[2];               // Explicit padding for 16-byte alignment
+} MetalFGBMEUniforms;
+
+// Uniforms for Synthetic Frame Warping fragment shader (16 bytes, 16-byte aligned)
+typedef struct {
+    float timeOffsetFactor;     // 0.5 for midpoint interpolation
+    float pad[3];               // Explicit padding for 16-byte alignment
+} MetalFGWarpUniforms;
+
 // Buffer indices shared between host code and MSL
 enum MetalFGBufferIndices {
-    MetalFGBufferIndexVertices = 0
+    MetalFGBufferIndexVertices = 0,
+    MetalFGBufferIndexBMEUniforms = 0,
+    MetalFGBufferIndexWarpUniforms = 1
 };
 
 // Texture indices shared between host code and MSL
 enum MetalFGTextureIndices {
-    MetalFGTextureIndexSource = 0
+    MetalFGTextureIndexSource = 0,
+    MetalFGTextureIndexMotionVectors = 1,
+    
+    // BME Compute Kernel Texture Indices
+    MetalFGBMETexturePrev = 0,
+    MetalFGBMETextureCurr = 1,
+    MetalFGBMETextureMotionVectors = 2
 };
 
 #endif /* ShaderTypes_h */

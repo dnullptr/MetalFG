@@ -22,21 +22,18 @@ extern const char kMetalFGIsSyntheticKey;
 
 // Debug settings
 @property (nonatomic, assign) BOOL debugTintEnabled;
-@property (nonatomic, assign) float edgeFadeWidth; // Default 0.02
 
 // Lifecycle
 - (nullable instancetype)initWithDevice:(id<MTLDevice>)device
                             pixelFormat:(MTLPixelFormat)pixelFormat;
 
-// Capture the game's rendered frame into double-buffered cache
+// Capture the game's rendered frame into double-buffered cache and dispatch BME
 - (void)captureBaseTexture:(id<MTLTexture>)sourceTexture
              withTimestamp:(CFTimeInterval)timestamp
-               orientation:(simd_quatf)orientation;
+             touchVelocity:(simd_float2)touchVelocity;
 
-// Render and present synthetic warped frame into the target drawable
+// Render and present synthetic motion-interpolated frame into target drawable
 - (BOOL)renderSyntheticFrameToDrawable:(id<CAMetalDrawable>)targetDrawable
-                     homographyMatrix:(simd_float3x3)homography
-                  invHomographyMatrix:(simd_float3x3)invHomography
                         targetTimeHint:(CFTimeInterval)targetTimeHint;
 
 // Check if a synthetic frame is currently processing on GPU

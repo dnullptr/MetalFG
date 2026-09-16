@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <simd/simd.h>
 #import "MetalFGWarper.h"
-#import "CoreMotionTracker.h"
+#import "TouchTracker.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -12,13 +12,11 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)sharedSynchronizer;
 
 @property (nonatomic, assign) BOOL isEnabled;
-@property (nonatomic, assign) float fovYDegrees;      // Camera vertical FOV (default 75.0)
 @property (nonatomic, assign) BOOL debugTint;         // Visual tint for synthetic frames
 
 // Active Metal resources
 @property (nonatomic, weak, nullable) CAMetalLayer *activeLayer;
 @property (nonatomic, strong, nullable) MetalFGWarper *warper;
-@property (nonatomic, strong, nullable) MetalFGMotionTracker *motionTracker;
 
 // Start/stop frame synchronizer
 - (void)startSynchronizerWithLayer:(CAMetalLayer *)layer
@@ -34,4 +32,3 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 NS_ASSUME_NONNULL_END
-

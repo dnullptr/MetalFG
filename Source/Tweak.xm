@@ -8,7 +8,7 @@
 #import <stdlib.h>
 
 #import "../Headers/ShaderTypes.h"
-#import "../Headers/CoreMotionTracker.h"
+#import "../Headers/TouchTracker.h"
 #import "../Headers/MetalFGWarper.h"
 #import "../Headers/MetalFGSynchronizer.h"
 #import "../Headers/MetalFGOverlay.h"
@@ -178,11 +178,11 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     }
     
     CFTimeInterval now = CACurrentMediaTime();
-    simd_quatf orientation = [[MetalFGMotionTracker sharedTracker] orientationAtTimestamp:now];
+    simd_quatf identityQuat = simd_quaternion(0.0f, 0.0f, 0.0f, 1.0f);
     
     [[MetalFGSynchronizer sharedSynchronizer] notifyNativeFramePresented:texture
                                                             atTimestamp:now
-                                                            orientation:orientation];
+                                                            orientation:identityQuat];
 }
 
 // ============================================================================
@@ -241,9 +241,16 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 %end
 
 // ============================================================================
-// Hook: UIWindow makeKeyAndVisible to attach overlay when window becomes active
+// Hook: UIWindow makeKeyAndVisible & touch event dispatching
 // ============================================================================
 %hook UIWindow
+
+- (void)sendEvent:(UIEvent *)event {
+    %orig(event);
+    if (event.type == UIEventTypeTouches) {
+        [[MetalFGTouchTracker sharedTracker] processTouchEvent:event];
+    }
+}
 
 - (void)makeKeyAndVisible {
     %orig;
@@ -314,14 +321,11 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         }
         
         NSLog(@"==================================================");
-        NSLog(@"[MetalFG] Initializing MetalFG for target: %s (%s)", progname, execPath);
+        NSLog(@"[MetalFG] Initializing MetalFG (Motion-Interpolated FG) for target: %s (%s)", progname, execPath);
         NSLog(@"==================================================");
         
         // Initialize Logos hooks strictly for this game process
         %init;
-        
-        // Start high-frequency CoreMotion sensor fusion
-        [[MetalFGMotionTracker sharedTracker] startTracking];
         
         // Immediately schedule HUD overlay display on the main queue
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -357,10 +361,6 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
             NSNumber *debugNum = prefs[@"debugTint"];
             if (debugNum) {
                 [MetalFGSynchronizer sharedSynchronizer].debugTint = [debugNum boolValue];
-            }
-            NSNumber *fovNum = prefs[@"fovY"];
-            if (fovNum) {
-                [MetalFGSynchronizer sharedSynchronizer].fovYDegrees = [fovNum floatValue];
             }
         }
     }

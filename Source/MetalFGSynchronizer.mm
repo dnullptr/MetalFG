@@ -1,5 +1,6 @@
 #import "../Headers/MetalFGSynchronizer.h"
 #import "../Headers/MetalFGOverlay.h"
+#import "../Headers/TouchTracker.h"
 #import <UIKit/UIKit.h>
 #import <os/lock.h>
 
@@ -9,7 +10,6 @@
     BOOL _shouldStopThread;
     
     CFTimeInterval _lastNativeFrameTime;
-    simd_quatf _lastNativeOrientation;
     os_unfair_lock _syncLock;
     
     // Performance statistics
@@ -38,12 +38,9 @@
     self = [super init];
     if (self) {
         _isEnabled = YES;
-        _fovYDegrees = 75.0f; // Typical standard field-of-view for 3D games
         _debugTint = NO;
         _syncLock = OS_UNFAIR_LOCK_INIT;
         _lastNativeFrameTime = 0.0;
-        _lastNativeOrientation = simd_quaternion(0.0f, 0.0f, 0.0f, 1.0f);
-        _motionTracker = [MetalFGMotionTracker sharedTracker];
         _shouldStopThread = NO;
         _isBackgrounded = NO;
         _hasInjectedForCurrentNativeFrame = NO;
@@ -76,7 +73,7 @@
     }
     os_unfair_lock_unlock(&_syncLock);
     
-    [_motionTracker stopTracking];
+    [[MetalFGTouchTracker sharedTracker] reset];
     NSLog(@"[MetalFG] Application entered background. Suspended frame synchronizer.");
 }
 
@@ -89,7 +86,6 @@
     _lastNativeFrameTime = CACurrentMediaTime();
     os_unfair_lock_unlock(&_syncLock);
     
-    [_motionTracker startTracking];
     [[MetalFGOverlay sharedOverlay] show];
     NSLog(@"[MetalFG] Application became active. Resumed frame synchronizer.");
 }
@@ -106,8 +102,6 @@
         _warper = [[MetalFGWarper alloc] initWithDevice:device pixelFormat:pixelFormat];
         _warper.debugTintEnabled = _debugTint;
     }
-    
-    [_motionTracker startTracking];
     
     if (!_syncThread || !_syncThread.isExecuting) {
         _shouldStopThread = NO;
@@ -131,7 +125,7 @@
     _displayLink = nil;
     os_unfair_lock_unlock(&_syncLock);
     
-    [_motionTracker stopTracking];
+    [[MetalFGTouchTracker sharedTracker] reset];
     NSLog(@"[MetalFG] Synchronizer stopped.");
 }
 
@@ -169,16 +163,18 @@
     
     os_unfair_lock_lock(&_syncLock);
     _lastNativeFrameTime = timestamp;
-    _lastNativeOrientation = orientation;
     _nativeFrameCount++;
     _hasInjectedForCurrentNativeFrame = NO;
     MetalFGWarper *currentWarper = _warper;
     BOOL enabled = _isEnabled;
     os_unfair_lock_unlock(&_syncLock);
     
-    // Copy the rendered game frame into double-buffered cache only if FG is enabled
+    // Sample latest touch camera velocity prior
+    simd_float2 touchVel = [[MetalFGTouchTracker sharedTracker] normalizedVelocityForScreenSize:CGSizeMake(texture.width, texture.height)];
+    
+    // Copy the rendered game frame into double-buffered cache and dispatch BME
     if (enabled && currentWarper && texture) {
-        [currentWarper captureBaseTexture:texture withTimestamp:timestamp orientation:orientation];
+        [currentWarper captureBaseTexture:texture withTimestamp:timestamp touchVelocity:touchVel];
     }
 }
 
@@ -220,9 +216,6 @@
         
         // STRICT 1:1 FRAME PACING:
         // Enforce at most 1 synthetic frame per native frame.
-        // If we already generated an interpolated frame for the current native frame,
-        // yield this refresh cycle completely so the game's render thread has exclusive,
-        // uncontended access to the swapchain.
         if (alreadyInjected) {
             return;
         }
@@ -237,30 +230,23 @@
         CFTimeInterval now = CACurrentMediaTime();
         CFTimeInterval elapsedSinceNative = now - lastNative;
         
-        // Frame Generation Pacing Logic:
-        // On 120Hz ProMotion: refresh interval = ~8.33ms (0.00833s).
-        // Native 60 FPS interval = ~16.67ms (0.01667s).
-        //
-        // Case 1: Native frame presented very recently (< 4.0ms ago).
-        // That native frame is occupying the current hardware refresh cycle. Skip synthetic injection.
+        // Frame Generation Pacing:
+        // Case 1: Native frame presented very recently (< 4.0ms ago). Skip synthetic injection.
         if (elapsedSinceNative < 0.0040) {
             return;
         }
         
-        // Case 2: Native frame has not arrived in > 150ms (game paused, loading screen, or static menu).
-        // Suspend synthetic generation to conserve GPU power and prevent thermal throttle.
+        // Case 2: Native frame has not arrived in > 150ms (game paused, loading, or static menu).
         if (elapsedSinceNative > 0.150) {
             return;
         }
         
         // Case 3: GPU Backpressure guard:
-        // If GPU queue is backed up, drop this tick immediately.
         if ([warper isGpuBusy]) {
             return;
         }
         
         // Case 4: Intermediate VSYNC tick! (e.g. 4.0ms - 15.0ms since last native frame)
-        // Safely acquire next drawable (allowsNextDrawableTimeout prevents deadlock)
         id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
         if (!syntheticDrawable || !syntheticDrawable.texture) {
             return;
@@ -269,15 +255,8 @@
         // Sample predicted presentation timestamp
         CFTimeInterval targetPresentationTime = link.targetTimestamp;
         
-        // Handheld Frame Generation:
-        // Identity reprojection matrix (flat 1:1, NO physical gyro tilt/shear)
-        simd_float3x3 H = matrix_identity_float3x3;
-        simd_float3x3 invH = matrix_identity_float3x3;
-        
-        // Render and present the synthetic frame
+        // Render and present the motion-interpolated synthetic frame
         BOOL rendered = [warper renderSyntheticFrameToDrawable:syntheticDrawable
-                                              homographyMatrix:H
-                                           invHomographyMatrix:invH
                                                 targetTimeHint:targetPresentationTime];
         
         if (rendered) {
