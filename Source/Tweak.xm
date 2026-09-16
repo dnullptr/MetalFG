@@ -33,7 +33,7 @@ static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
     // If size is set, check that it's larger than tiny HUD overlays
     CGSize drawableSize = layer.drawableSize;
     if (drawableSize.width > 0 && drawableSize.height > 0) {
-        if (drawableSize.width < kMinHUDDimension && drawableSize.height < kMinHUDDimension) {
+        if (drawableSize.width < 250.0 || drawableSize.height < 150.0) {
             return NO;
         }
     }
@@ -121,8 +121,35 @@ static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
 %end
 
 // ============================================================================
+// Hook: CADisplayLink to unlock 120Hz refresh rates in games
+// ============================================================================
+%hook CADisplayLink
+
+- (void)setPreferredFramesPerSecond:(NSInteger)fps {
+    %orig(120);
+}
+
+- (void)setPreferredFrameRateRange:(CAFrameRateRange)range {
+    range.minimum = 60.0f;
+    range.preferred = 120.0f;
+    range.maximum = 120.0f;
+    %orig(range);
+}
+
+- (void)setFrameInterval:(NSInteger)interval {
+    %orig(1);
+    if ([self respondsToSelector:@selector(setPreferredFramesPerSecond:)]) {
+        self.preferredFramesPerSecond = 120;
+    }
+}
+
+%end
+
+// ============================================================================
 // Helper: Process Native Frame Presentation
 // ============================================================================
+static char kMetalFGProcessedKey;
+
 static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     if (!drawable) return;
     
@@ -132,24 +159,30 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         return;
     }
     
+    // 2. Deduplication guard: do not process the same drawable twice in one frame
+    if (objc_getAssociatedObject(drawable, &kMetalFGProcessedKey)) {
+        return;
+    }
+    objc_setAssociatedObject(drawable, &kMetalFGProcessedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    
     id<MTLTexture> texture = drawable.texture;
     if (!texture) return;
     
-    // 2. HUD / Overlay guard: ignore small textures (e.g. CAPerfHud / MetalHUD)
-    if (texture.width < kMinHUDDimension && texture.height < kMinHUDDimension) {
+    // 3. HUD / Overlay guard: ignore small textures (e.g. CAPerfHud / MetalHUD)
+    if (texture.width < 250 || texture.height < 150) {
         return;
     }
     
-    // 3. Bind active layer if not already bound
+    // 4. Bind active layer if not already bound
     CAMetalLayer *activeLayer = [MetalFGSynchronizer sharedSynchronizer].activeLayer;
     if (!activeLayer && drawable.layer) {
         activeLayer = drawable.layer;
         [[MetalFGSynchronizer sharedSynchronizer] startSynchronizerWithLayer:activeLayer
                                                                     device:activeLayer.device
-                                                               pixelFormat:activeLayer.pixelFormat];
+                                                                pixelFormat:activeLayer.pixelFormat];
     }
     
-    // 4. If layer is set, ensure this drawable belongs to the game layer
+    // 5. If layer is set, ensure this drawable belongs to the game layer
     if (activeLayer && drawable.layer && drawable.layer != activeLayer) {
         return;
     }

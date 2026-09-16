@@ -141,14 +141,15 @@
         
         // Target 120Hz ProMotion display refresh rate on iOS 15+
         if (@available(iOS 15.0, *)) {
-            _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(120.0f, 120.0f, 120.0f);
+            _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(60.0f, 120.0f, 120.0f);
         }
+        _displayLink.preferredFramesPerSecond = 120;
         
         [_displayLink addToRunLoop:currentRunLoop forMode:NSRunLoopCommonModes];
         
         while (!_shouldStopThread) {
             @autoreleasepool {
-                [currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.010]];
+                [currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.5]];
             }
         }
     }
@@ -181,6 +182,24 @@
     @autoreleasepool {
         if (!_isEnabled || _isBackgrounded) return;
         
+        // Periodic FPS logging & On-Screen Overlay update (every 1.0s, evaluated on every tick)
+        CFTimeInterval statsNow = CACurrentMediaTime();
+        if (statsNow - _lastStatsLogTime >= 1.0) {
+            double duration = statsNow - _lastStatsLogTime;
+            double nativeFps = (double)_nativeFrameCount / duration;
+            double syntheticFps = (double)_syntheticFrameCount / duration;
+            
+            // Update floating on-screen indicator
+            [[MetalFGOverlay sharedOverlay] updateWithNativeFPS:nativeFps syntheticFPS:syntheticFps];
+            
+            NSLog(@"[MetalFG] Performance: Native: %.1f FPS | Synthetic: %.1f FPS | Total: %.1f FPS",
+                  nativeFps, syntheticFps, nativeFps + syntheticFps);
+            
+            _nativeFrameCount = 0;
+            _syntheticFrameCount = 0;
+            _lastStatsLogTime = statsNow;
+        }
+        
         os_unfair_lock_lock(&_syncLock);
         CFTimeInterval lastNative = _lastNativeFrameTime;
         simd_quatf baseQuat = _lastNativeOrientation;
@@ -193,11 +212,6 @@
         // Ignore HUD/sub-layers smaller than 250x150
         CGSize drawableSize = layer.drawableSize;
         if (drawableSize.width < 250.0 || drawableSize.height < 150.0) {
-            return;
-        }
-        
-        // Application state check
-        if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
             return;
         }
         
@@ -222,7 +236,7 @@
         }
         
         // Case 3: GPU Backpressure guard:
-        // If GPU is currently busy drawing previous synthetic frame, drop this tick immediately.
+        // If GPU queue is backed up, drop this tick immediately.
         if ([warper isGpuBusy]) {
             return;
         }
@@ -261,24 +275,6 @@
         
         if (rendered) {
             _syntheticFrameCount++;
-        }
-        
-        // Periodic FPS logging & On-Screen Overlay update (every 1.0s)
-        CFTimeInterval statsNow = CACurrentMediaTime();
-        if (statsNow - _lastStatsLogTime >= 1.0) {
-            double duration = statsNow - _lastStatsLogTime;
-            double nativeFps = (double)_nativeFrameCount / duration;
-            double syntheticFps = (double)_syntheticFrameCount / duration;
-            
-            // Update floating on-screen indicator
-            [[MetalFGOverlay sharedOverlay] updateWithNativeFPS:nativeFps syntheticFPS:syntheticFps];
-            
-            NSLog(@"[MetalFG] Performance: Native: %.1f FPS | Synthetic: %.1f FPS | Total: %.1f FPS",
-                  nativeFps, syntheticFps, nativeFps + syntheticFps);
-            
-            _nativeFrameCount = 0;
-            _syntheticFrameCount = 0;
-            _lastStatsLogTime = statsNow;
         }
     }
 }

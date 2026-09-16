@@ -231,7 +231,7 @@ static const MetalFGVertex kQuadVertices[6] = {
 - (void)captureBaseTexture:(id<MTLTexture>)sourceTexture
              withTimestamp:(CFTimeInterval)timestamp
                orientation:(simd_quatf)orientation {
-    if (!sourceTexture || sourceTexture.width < 600 || sourceTexture.height < 600) return;
+    if (!sourceTexture || sourceTexture.width < 250 || sourceTexture.height < 150) return;
     
     [self ensureTextureStorageForSource:sourceTexture];
     
@@ -330,12 +330,8 @@ static const MetalFGVertex kQuadVertices[6] = {
     // Tag the synthetic drawable to prevent recursive presentation hooking
     objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // Schedule presentation with pacing hint
-    if (targetTimeHint > 0.0) {
-        [cmdBuffer presentDrawable:targetDrawable atTime:targetTimeHint];
-    } else {
-        [cmdBuffer presentDrawable:targetDrawable];
-    }
+    // Present synthetic drawable directly upon render pass completion
+    [cmdBuffer presentDrawable:targetDrawable];
     
     _inFlightGpuFrames.fetch_add(1);
     __weak MetalFGWarper *weakSelf = self;
@@ -351,7 +347,7 @@ static const MetalFGVertex kQuadVertices[6] = {
 }
 
 - (BOOL)isGpuBusy {
-    return _inFlightGpuFrames.load() >= 1;
+    return _inFlightGpuFrames.load() >= 2;
 }
 
 @end

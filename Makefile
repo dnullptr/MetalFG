@@ -14,7 +14,7 @@ MetalFG_FILES = Source/Tweak.xm \
                 Source/MetalFGSynchronizer.mm \
                 Source/MetalFGOverlay.mm
 
-MetalFG_CFLAGS = -fobjc-arc -IHeaders -std=c++17 -O3 -Wall -Wno-unused-variable
+MetalFG_CFLAGS = -fobjc-arc -IHeaders -std=c++17 -O3 -Wall -Wno-unused-variable -Wno-deprecated-declarations
 MetalFG_FRAMEWORKS = Metal QuartzCore CoreMotion UIKit CoreGraphics
 
 include $(THEOS_MAKE_PATH)/tweak.mk

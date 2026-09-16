@@ -1,4 +1,7 @@
 #import "../Headers/MetalFGOverlay.h"
+#import <UIKit/UIKit.h>
+#import <UIKit/UIGestureRecognizerSubclass.h>
+#import <math.h>
 
 @interface MetalFGOverlay () {
     UIView *_pillView;
@@ -53,10 +56,12 @@
         [_pillView addSubview:_fpsLabel];
         
         // Gestures: Drag to move, Tap to toggle compact mode
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self selector:@selector(handlePan:)];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] init];
+        [pan addTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
         
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self selector:@selector(handleTap:)];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] init];
+        [tap addTarget:self action:@selector(handleTap:)];
         [self addGestureRecognizer:tap];
     }
     return self;
@@ -104,15 +109,28 @@
         if (self.superview) return;
         
         UIWindow *targetWindow = nil;
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (!w.isHidden && w.isKeyWindow) {
-                targetWindow = w;
-                break;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                for (UIWindow *w in windowScene.windows) {
+                    if (w.isKeyWindow || !w.isHidden) {
+                        targetWindow = w;
+                        break;
+                    }
+                }
             }
+            if (targetWindow) break;
         }
+        
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (!targetWindow) {
+            targetWindow = [UIApplication sharedApplication].keyWindow;
+        }
+        if (!targetWindow && [UIApplication sharedApplication].windows.count > 0) {
             targetWindow = [UIApplication sharedApplication].windows.firstObject;
         }
+        #pragma clang diagnostic pop
         
         if (targetWindow) {
             [targetWindow addSubview:self];
