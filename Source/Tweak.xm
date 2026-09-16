@@ -273,7 +273,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         
         // Ensure this is an application bundle (.app)
         NSString *bundlePath = [NSBundle mainBundle].bundlePath;
-        if (!bundlePath || ![bundlePath.pathExtension isEqualToString:@"app"]) {
+        if (!bundlePath || ![bundlePath.lowercaseString containsString:@".app"]) {
             return;
         }
         
@@ -292,6 +292,19 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         
         // Start high-frequency CoreMotion sensor fusion
         [[MetalFGMotionTracker sharedTracker] startTracking];
+        
+        // Immediately show status overlay on the main queue
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[MetalFGOverlay sharedOverlay] show];
+        });
+        
+        // Ensure overlay is shown when application becomes active
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification * _Nonnull note) {
+            [[MetalFGOverlay sharedOverlay] show];
+        }];
         
         // Load preferences
         NSString *prefPath = @"/var/jb/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist";
