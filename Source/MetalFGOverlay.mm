@@ -189,6 +189,18 @@
             }
         }
         
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if (!activeScene) {
+            for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                if (w.windowScene) {
+                    activeScene = w.windowScene;
+                    break;
+                }
+            }
+        }
+        #pragma clang diagnostic pop
+        
         if (!self->_overlayWindow) {
             if (activeScene) {
                 self->_overlayWindow = [[MetalFGOverlayWindow alloc] initWithWindowScene:activeScene];
