@@ -143,10 +143,10 @@ static NSString * const kEmbeddedMetalSource = @""
 "    if (dot(mv, mv) < 1e-7f) {\n"
 "        return origColor;\n"
 "    }\n"
-"    float2 warpedUV = in.texCoords + mv * uniforms.timeOffsetFactor;\n"
+"    float2 warpedUV = in.texCoords - mv * uniforms.timeOffsetFactor;\n"
 "    float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);\n"
 "    float colorDist = distance(warpedColor.rgb, origColor.rgb);\n"
-"    float confidence = smoothstep(0.38f, 0.06f, colorDist);\n"
+"    float confidence = smoothstep(0.28f, 0.04f, colorDist);\n"
 "    return mix(origColor, warpedColor, confidence);\n"
 "}\n";
 
@@ -482,12 +482,8 @@ static const MetalFGVertex kQuadVertices[6] = {
     // Tag synthetic drawable to prevent recursive presentation hooking
     objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // Present synthetic drawable at the exact hardware display timestamp hint
-    if (targetTimeHint > 0.0) {
-        [cmdBuffer presentDrawable:targetDrawable atTime:targetTimeHint];
-    } else {
-        [cmdBuffer presentDrawable:targetDrawable];
-    }
+    // Present synthetic drawable directly upon render pass completion for next hardware refresh
+    [cmdBuffer presentDrawable:targetDrawable];
     
     _inFlightGpuFrames.fetch_add(1);
     __weak MetalFGWarper *weakSelf = self;

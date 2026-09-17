@@ -191,8 +191,9 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
         return origColor;
     }
     
-    // Sample warped pixel along forward motion vector
-    float2 warpedUV = in.texCoords + mv * uniforms.timeOffsetFactor;
+    // Backward mapping: To find the pixel value at in.texCoords at time t + 0.5,
+    // we must look backward into the source frame at in.texCoords - mv * uniforms.timeOffsetFactor!
+    float2 warpedUV = in.texCoords - mv * uniforms.timeOffsetFactor;
     float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);
     
     // Disocclusion Rejection:
@@ -200,7 +201,7 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     // warpedColor and origColor diverge significantly.
     // In that case, smoothly blend back towards origColor to eliminate ghosting!
     float colorDist = distance(warpedColor.rgb, origColor.rgb);
-    float confidence = smoothstep(0.38f, 0.06f, colorDist);
+    float confidence = smoothstep(0.28f, 0.04f, colorDist);
     
     return mix(origColor, warpedColor, confidence);
 }

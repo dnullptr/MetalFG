@@ -215,7 +215,7 @@
         if (!layer || !warper || !warper.isReady) return;
         
         // STRICT 1:1 FRAME PACING:
-        // Enforce at most 1 synthetic frame per native frame.
+        // Enforce exactly 1 synthetic frame per native frame.
         if (alreadyInjected) {
             return;
         }
@@ -226,22 +226,13 @@
             return;
         }
         
-        // Use consistent monotonic time for physical elapsed calculation
+        // Idle guard: if no native frame has arrived in > 150ms (game paused, loading screen, or static menu)
         CFTimeInterval now = CACurrentMediaTime();
-        CFTimeInterval elapsedSinceNative = now - lastNative;
-        
-        // Frame Generation Pacing:
-        // Case 1: Native frame presented very recently (< 4.0ms ago). Skip synthetic injection.
-        if (elapsedSinceNative < 0.0040) {
+        if (now - lastNative > 0.150) {
             return;
         }
         
-        // Case 2: Native frame has not arrived in > 150ms (game paused, loading, or static menu).
-        if (elapsedSinceNative > 0.150) {
-            return;
-        }
-        
-        // Case 3: GPU Backpressure guard:
+        // GPU Backpressure guard:
         if ([warper isGpuBusy]) {
             return;
         }
