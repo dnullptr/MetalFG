@@ -1,7 +1,7 @@
 Package: com.dnullptr.metalfg
 Name: MetalFG
 Depends: mobilesubstrate (>= 0.9.5000)
-Version: 1.0.8
+Version: 1.0.9
 Architecture: iphoneos-arm64
 Description: Real-time GPU Motion-Interpolated Frame Generation (Block Motion Estimation & Touch Extrapolation) for Metal games on iOS 16 ProMotion devices.
 Maintainer: MetalFG Team

@@ -23,7 +23,8 @@ static NSString * const kEmbeddedMetalSource = @""
 "    uint2 gridDimensions;\n"
 "    float uiThreshold;\n"
 "    float searchRadius;\n"
-"    float pad[2];\n"
+"    float maxDisplacement;\n"
+"    float pad;\n"
 "};\n"
 "\n"
 "struct MetalFGWarpUniforms {\n"
@@ -56,26 +57,30 @@ static NSString * const kEmbeddedMetalSource = @""
 "    if (gid.x >= uniforms.gridDimensions.x || gid.y >= uniforms.gridDimensions.y) return;\n"
 "    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);\n"
 "    float2 centerUV = (float2(gid) + 0.5f) / float2(uniforms.gridDimensions);\n"
-"    float centerDiff = 0.0f;\n"
+"    bool isHUDZone = (centerUV.y < 0.18f) || (centerUV.x < 0.35f && centerUV.y > 0.55f) || (centerUV.x > 0.65f && centerUV.y > 0.55f);\n"
 "    const float dUV = 0.004f;\n"
-"    for (int dy = -1; dy <= 1; dy++) {\n"
-"        for (int dx = -1; dx <= 1; dx++) {\n"
-"            float2 sampleUV = centerUV + float2(dx, dy) * dUV;\n"
-"            centerDiff += abs(rgb_to_luma(currTexture.sample(s, sampleUV)) - rgb_to_luma(prevTexture.sample(s, sampleUV)));\n"
+"    float errZero = 0.0f;\n"
+"    for (int py = -1; py <= 1; py++) {\n"
+"        for (int px = -1; px <= 1; px++) {\n"
+"            float2 uvCurr = centerUV + float2(px, py) * dUV;\n"
+"            errZero += abs(rgb_to_luma(currTexture.sample(s, uvCurr)) - rgb_to_luma(prevTexture.sample(s, uvCurr)));\n"
 "        }\n"
 "    }\n"
-"    centerDiff /= 9.0f;\n"
-"    if (centerDiff < uniforms.uiThreshold) {\n"
+"    errZero /= 9.0f;\n"
+"    float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.5f) : uniforms.uiThreshold;\n"
+"    if (errZero < effectiveThreshold) {\n"
 "        motionVectors.write(float4(0.0f, 0.0f, 0.0f, 1.0f), gid);\n"
 "        return;\n"
 "    }\n"
 "    float2 prior = uniforms.touchVelocity;\n"
-"    float bestError = 1e6f;\n"
-"    float2 bestVector = prior;\n"
+"    float bestError = errZero;\n"
+"    float2 bestVector = float2(0.0f, 0.0f);\n"
 "    float stepSize = uniforms.searchRadius / 4.0f;\n"
 "    for (int sy = -2; sy <= 2; sy++) {\n"
 "        for (int sx = -2; sx <= 2; sx++) {\n"
 "            float2 candidate = prior + float2(sx, sy) * stepSize;\n"
+"            float candLen = length(candidate);\n"
+"            if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;\n"
 "            float error = 0.0f;\n"
 "            for (int py = -1; py <= 1; py++) {\n"
 "                for (int px = -1; px <= 1; px++) {\n"
@@ -84,14 +89,48 @@ static NSString * const kEmbeddedMetalSource = @""
 "                    error += abs(rgb_to_luma(currTexture.sample(s, uvCurr)) - rgb_to_luma(prevTexture.sample(s, uvPrev)));\n"
 "                }\n"
 "            }\n"
-"            error += length(candidate) * 0.02f;\n"
+"            error /= 9.0f;\n"
+"            error += length(candidate - prior) * 0.03f;\n"
+"            if (isHUDZone) error += 0.04f;\n"
 "            if (error < bestError) {\n"
 "                bestError = error;\n"
 "                bestVector = candidate;\n"
 "            }\n"
 "        }\n"
 "    }\n"
+"    float finalLen = length(bestVector);\n"
+"    if (finalLen > uniforms.maxDisplacement) bestVector = (bestVector / finalLen) * uniforms.maxDisplacement;\n"
 "    motionVectors.write(float4(bestVector, 0.0f, 1.0f), gid);\n"
+"}\n"
+"\n"
+"inline float median9(float p[9]) {\n"
+"    for (int i = 0; i < 5; i++) {\n"
+"        for (int j = i + 1; j < 9; j++) {\n"
+"            if (p[j] < p[i]) {\n"
+"                float tmp = p[i]; p[i] = p[j]; p[j] = tmp;\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    return p[4];\n"
+"}\n"
+"\n"
+"kernel void metalfg_motion_median_filter(uint2 gid [[thread_position_in_grid]],\n"
+"                                        texture2d<float, access::read> inVectors [[texture(0)]],\n"
+"                                        texture2d<float, access::write> outVectors [[texture(1)]]) {\n"
+"    uint width = inVectors.get_width();\n"
+"    uint height = inVectors.get_height();\n"
+"    if (gid.x >= width || gid.y >= height) return;\n"
+"    float vx[9], vy[9];\n"
+"    int idx = 0;\n"
+"    for (int dy = -1; dy <= 1; dy++) {\n"
+"        for (int dx = -1; dx <= 1; dx++) {\n"
+"            int cx = clamp(int(gid.x) + dx, 0, int(width) - 1);\n"
+"            int cy = clamp(int(gid.y) + dy, 0, int(height) - 1);\n"
+"            float2 v = inVectors.read(uint2(cx, cy)).xy;\n"
+"            vx[idx] = v.x; vy[idx] = v.y; idx++;\n"
+"        }\n"
+"    }\n"
+"    outVectors.write(float4(median9(vx), median9(vy), 0.0f, 1.0f), gid);\n"
 "}\n"
 "\n"
 "fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],\n"
@@ -99,12 +138,16 @@ static NSString * const kEmbeddedMetalSource = @""
 "                                 texture2d<float, access::sample> motionVectors [[texture(1)]],\n"
 "                                 constant MetalFGWarpUniforms &uniforms [[buffer(1)]]) {\n"
 "    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);\n"
+"    float4 origColor = sourceTexture.sample(linearSampler, in.texCoords);\n"
 "    float2 mv = motionVectors.sample(linearSampler, in.texCoords).xy;\n"
 "    if (dot(mv, mv) < 1e-7f) {\n"
-"        return sourceTexture.sample(linearSampler, in.texCoords);\n"
+"        return origColor;\n"
 "    }\n"
 "    float2 warpedUV = in.texCoords + mv * uniforms.timeOffsetFactor;\n"
-"    return sourceTexture.sample(linearSampler, warpedUV);\n"
+"    float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);\n"
+"    float colorDist = distance(warpedColor.rgb, origColor.rgb);\n"
+"    float confidence = smoothstep(0.38f, 0.06f, colorDist);\n"
+"    return mix(origColor, warpedColor, confidence);\n"
 "}\n";
 
 // Full-screen quad consisting of 2 triangles (6 vertices)
@@ -124,11 +167,13 @@ static const MetalFGVertex kQuadVertices[6] = {
     id<MTLCommandQueue> _commandQueue;
     id<MTLRenderPipelineState> _pipelineState;
     id<MTLComputePipelineState> _bmePipelineState;
+    id<MTLComputePipelineState> _medianPipelineState;
     id<MTLBuffer> _vertexBuffer;
     
     // Double-buffered intermediate textures to prevent race conditions with swapchain recycling
     id<MTLTexture> _cachedTextures[2];
     id<MTLTexture> _motionVectorTexture;
+    id<MTLTexture> _smoothedMotionVectorTexture;
     NSInteger _activeReadIndex;
     NSInteger _activeWriteIndex;
     BOOL _hasValidBaseFrame;
@@ -210,6 +255,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     id<MTLFunction> vertexFunc = [library newFunctionWithName:@"metalfg_vertex"];
     id<MTLFunction> fragmentFunc = [library newFunctionWithName:@"metalfg_fragment"];
     id<MTLFunction> bmeFunc = [library newFunctionWithName:@"metalfg_block_motion_estimation"];
+    id<MTLFunction> medianFunc = [library newFunctionWithName:@"metalfg_motion_median_filter"];
     
     if (!vertexFunc || !fragmentFunc) {
         NSLog(@"[MetalFG] Error: Shader entry points not found in library.");
@@ -231,10 +277,15 @@ static const MetalFGVertex kQuadVertices[6] = {
     
     if (bmeFunc) {
         _bmePipelineState = [_device newComputePipelineStateWithFunction:bmeFunc error:&error];
-        if (!_bmePipelineState) {
-            NSLog(@"[MetalFG] Warning: Failed to create BME compute pipeline: %@", error.localizedDescription);
-        } else {
+        if (_bmePipelineState) {
             NSLog(@"[MetalFG] Block Motion Estimation compute pipeline created successfully.");
+        }
+    }
+    
+    if (medianFunc) {
+        _medianPipelineState = [_device newComputePipelineStateWithFunction:medianFunc error:&error];
+        if (_medianPipelineState) {
+            NSLog(@"[MetalFG] Motion Median Filter compute pipeline created successfully.");
         }
     }
     
@@ -274,7 +325,7 @@ static const MetalFGVertex kQuadVertices[6] = {
               (unsigned long)sourceTexture.width, (unsigned long)sourceTexture.height, (unsigned long)sourceTexture.pixelFormat);
     }
     
-    // Allocate lightweight motion vector grid texture (80x45, RG16Float: ~14 KB)
+    // Allocate lightweight motion vector grid textures (80x45, RG16Float: ~14 KB each)
     if (!_motionVectorTexture) {
         MTLTextureDescriptor *mvDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float
                                                                                           width:kGridWidth
@@ -283,8 +334,11 @@ static const MetalFGVertex kQuadVertices[6] = {
         mvDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
         mvDesc.storageMode = MTLStorageModePrivate;
         _motionVectorTexture = [_device newTextureWithDescriptor:mvDesc];
-        _motionVectorTexture.label = @"com.metalfg.motionVectors";
-        NSLog(@"[MetalFG] Allocated motion vector grid: %ux%u", kGridWidth, kGridHeight);
+        _motionVectorTexture.label = @"com.metalfg.rawMotionVectors";
+        
+        _smoothedMotionVectorTexture = [_device newTextureWithDescriptor:mvDesc];
+        _smoothedMotionVectorTexture.label = @"com.metalfg.smoothedMotionVectors";
+        NSLog(@"[MetalFG] Allocated motion vector grids: %ux%u", kGridWidth, kGridHeight);
     }
     
     os_unfair_lock_unlock(&_textureLock);
@@ -303,8 +357,10 @@ static const MetalFGVertex kQuadVertices[6] = {
     id<MTLTexture> destTexture = _cachedTextures[writeIdx];
     id<MTLTexture> prevTexture = _cachedTextures[readIdx];
     BOOL hasPrevFrame = _hasValidBaseFrame;
-    id<MTLTexture> mvTexture = _motionVectorTexture;
+    id<MTLTexture> rawMVTexture = _motionVectorTexture;
+    id<MTLTexture> smoothMVTexture = _smoothedMotionVectorTexture;
     id<MTLComputePipelineState> bmePipeline = _bmePipelineState;
+    id<MTLComputePipelineState> medianPipeline = _medianPipelineState;
     os_unfair_lock_unlock(&_textureLock);
     
     if (!destTexture) return;
@@ -325,21 +381,22 @@ static const MetalFGVertex kQuadVertices[6] = {
         destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
     
-    // Pass 2: Block Motion Estimation & UI Masking Compute Kernel
-    if (hasPrevFrame && prevTexture && bmePipeline && mvTexture) {
+    // Pass 2: Block Motion Estimation with Static UI Prior
+    if (hasPrevFrame && prevTexture && bmePipeline && rawMVTexture) {
         id<MTLComputeCommandEncoder> comp = [cmdBuffer computeCommandEncoder];
+        comp.label = @"com.metalfg.bmePass";
         [comp setComputePipelineState:bmePipeline];
         [comp setTexture:prevTexture atIndex:MetalFGBMETexturePrev];
         [comp setTexture:destTexture atIndex:MetalFGBMETextureCurr];
-        [comp setTexture:mvTexture atIndex:MetalFGBMETextureMotionVectors];
+        [comp setTexture:rawMVTexture atIndex:MetalFGBMETextureMotionVectors];
         
         MetalFGBMEUniforms bmeUniforms;
         bmeUniforms.touchVelocity = touchVelocity;
         bmeUniforms.gridDimensions = simd_make_uint2(kGridWidth, kGridHeight);
         bmeUniforms.uiThreshold = 0.035f;
         bmeUniforms.searchRadius = 0.040f;
-        bmeUniforms.pad[0] = 0.0f;
-        bmeUniforms.pad[1] = 0.0f;
+        bmeUniforms.maxDisplacement = 0.035f; // Cap displacement to prevent tearing
+        bmeUniforms.pad = 0.0f;
         
         [comp setBytes:&bmeUniforms length:sizeof(bmeUniforms) atIndex:MetalFGBufferIndexBMEUniforms];
         
@@ -347,6 +404,17 @@ static const MetalFGVertex kQuadVertices[6] = {
         MTLSize threadgroups = MTLSizeMake((kGridWidth + 15) / 16, (kGridHeight + 15) / 16, 1);
         [comp dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
         [comp endEncoding];
+        
+        // Pass 3: 3x3 Spatial Median Smoothing (kills boiling shimmer)
+        if (medianPipeline && smoothMVTexture) {
+            id<MTLComputeCommandEncoder> medComp = [cmdBuffer computeCommandEncoder];
+            medComp.label = @"com.metalfg.medianSmoothPass";
+            [medComp setComputePipelineState:medianPipeline];
+            [medComp setTexture:rawMVTexture atIndex:MetalFGSmoothTextureInput];
+            [medComp setTexture:smoothMVTexture atIndex:MetalFGSmoothTextureOutput];
+            [medComp dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+            [medComp endEncoding];
+        }
     }
     
     __weak MetalFGWarper *weakSelf = self;
@@ -374,7 +442,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         return NO;
     }
     id<MTLTexture> sourceTex = _cachedTextures[_activeReadIndex];
-    id<MTLTexture> mvTex = _motionVectorTexture;
+    id<MTLTexture> mvTex = _smoothedMotionVectorTexture ? _smoothedMotionVectorTexture : _motionVectorTexture;
     os_unfair_lock_unlock(&_textureLock);
     
     if (!sourceTex) return NO;

@@ -20,8 +20,9 @@ typedef struct {
     simd_float2 touchVelocity;  // Normalized UV velocity delta from touch tracking
     simd_uint2 gridDimensions;  // Number of blocks (width, height) e.g. (80, 45)
     float uiThreshold;          // Static UI luminance threshold (e.g. 0.035)
-    float searchRadius;         // Search radius in UV space (e.g. 0.04)
-    float pad[2];               // Explicit padding for 16-byte alignment
+    float searchRadius;         // Search radius in UV space (e.g. 0.040)
+    float maxDisplacement;      // Maximum motion vector magnitude cap (e.g. 0.035)
+    float pad;                  // Explicit padding for 16-byte alignment
 } MetalFGBMEUniforms;
 
 // Uniforms for Synthetic Frame Warping fragment shader (16 bytes, 16-byte aligned)
@@ -45,7 +46,11 @@ enum MetalFGTextureIndices {
     // BME Compute Kernel Texture Indices
     MetalFGBMETexturePrev = 0,
     MetalFGBMETextureCurr = 1,
-    MetalFGBMETextureMotionVectors = 2
+    MetalFGBMETextureMotionVectors = 2,
+    
+    // Median Filter Compute Kernel Texture Indices
+    MetalFGSmoothTextureInput = 0,
+    MetalFGSmoothTextureOutput = 1
 };
 
 #endif /* ShaderTypes_h */
