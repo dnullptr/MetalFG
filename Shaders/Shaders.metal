@@ -116,6 +116,13 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         }
     }
     
+    // False-motion rejection:
+    // If the best moving candidate does not beat stationary (0, 0) by at least 15%,
+    // stay locked to stationary (0, 0) to eliminate noise on flat/subtle textures
+    if (bestError > errZero * 0.85f) {
+        bestVector = float2(0.0f, 0.0f);
+    }
+    
     // Clamp final vector magnitude
     float finalLen = length(bestVector);
     if (finalLen > uniforms.maxDisplacement) {
@@ -199,9 +206,11 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     // Disocclusion Rejection:
     // When moving edges reveal new background or when motion estimation fails,
     // warpedColor and origColor diverge significantly.
-    // In that case, smoothly blend back towards origColor to eliminate ghosting!
+    // Use a tight transition around disocclusionThreshold so pixels are either
+    // crisply warped or cleanly clamped without 50/50 ghost transparency.
     float colorDist = distance(warpedColor.rgb, origColor.rgb);
-    float confidence = smoothstep(0.28f, 0.04f, colorDist);
+    float threshold = uniforms.disocclusionThreshold;
+    float confidence = smoothstep(threshold, threshold * 0.35f, colorDist);
     
     return mix(origColor, warpedColor, confidence);
 }

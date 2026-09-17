@@ -14,6 +14,16 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL isEnabled;
 @property (nonatomic, assign) BOOL debugTint;         // Visual tint for synthetic frames
 
+// Dynamic Tuning Parameters
+@property (nonatomic, assign) float motionScale;             // Default: 0.42 (Range: 0.10 - 0.80)
+@property (nonatomic, assign) float disocclusionThreshold;   // Default: 0.22 (Range: 0.10 - 0.40)
+@property (nonatomic, assign) float uiSensitivity;           // Default: 0.035 (Range: 0.01 - 0.08)
+@property (nonatomic, assign) NSInteger currentPreset;       // 0: Clear, 1: Balanced, 2: Fluid, 3: Custom
+
+- (void)applyPreset:(NSInteger)presetIndex;
+- (void)savePreferences;
+- (void)loadPreferences;
+
 // Active Metal resources
 @property (nonatomic, weak, nullable) CAMetalLayer *activeLayer;
 @property (nonatomic, strong, nullable) MetalFGWarper *warper;

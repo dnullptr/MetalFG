@@ -29,7 +29,8 @@ static NSString * const kEmbeddedMetalSource = @""
 "\n"
 "struct MetalFGWarpUniforms {\n"
 "    float timeOffsetFactor;\n"
-"    float pad[3];\n"
+"    float disocclusionThreshold;\n"
+"    float pad[2];\n"
 "};\n"
 "\n"
 "struct RasterizerData {\n"
@@ -98,6 +99,9 @@ static NSString * const kEmbeddedMetalSource = @""
 "            }\n"
 "        }\n"
 "    }\n"
+"    if (bestError > errZero * 0.85f) {\n"
+"        bestVector = float2(0.0f, 0.0f);\n"
+"    }\n"
 "    float finalLen = length(bestVector);\n"
 "    if (finalLen > uniforms.maxDisplacement) bestVector = (bestVector / finalLen) * uniforms.maxDisplacement;\n"
 "    motionVectors.write(float4(bestVector, 0.0f, 1.0f), gid);\n"
@@ -146,7 +150,8 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float2 warpedUV = in.texCoords - mv * uniforms.timeOffsetFactor;\n"
 "    float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);\n"
 "    float colorDist = distance(warpedColor.rgb, origColor.rgb);\n"
-"    float confidence = smoothstep(0.28f, 0.04f, colorDist);\n"
+"    float threshold = uniforms.disocclusionThreshold;\n"
+"    float confidence = smoothstep(threshold, threshold * 0.35f, colorDist);\n"
 "    return mix(origColor, warpedColor, confidence);\n"
 "}\n";
 
@@ -202,6 +207,9 @@ static const MetalFGVertex kQuadVertices[6] = {
         _hasValidBaseFrame = NO;
         _inFlightGpuFrames = 0;
         _debugTintEnabled = NO;
+        _motionScale = 0.42f;
+        _disocclusionThreshold = 0.22f;
+        _uiSensitivity = 0.035f;
         
         _commandQueue = [_device newCommandQueue];
         _commandQueue.label = @"com.metalfg.warperqueue";
@@ -393,7 +401,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         MetalFGBMEUniforms bmeUniforms;
         bmeUniforms.touchVelocity = touchVelocity;
         bmeUniforms.gridDimensions = simd_make_uint2(kGridWidth, kGridHeight);
-        bmeUniforms.uiThreshold = 0.035f;
+        bmeUniforms.uiThreshold = self.uiSensitivity;
         bmeUniforms.searchRadius = 0.040f;
         bmeUniforms.maxDisplacement = 0.035f; // Cap displacement to prevent tearing
         bmeUniforms.pad = 0.0f;
@@ -470,10 +478,10 @@ static const MetalFGVertex kQuadVertices[6] = {
     }
     
     MetalFGWarpUniforms warpUniforms;
-    warpUniforms.timeOffsetFactor = 0.5f; // 50% midpoint forward extrapolation
+    warpUniforms.timeOffsetFactor = self.motionScale;
+    warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
     warpUniforms.pad[0] = 0.0f;
     warpUniforms.pad[1] = 0.0f;
-    warpUniforms.pad[2] = 0.0f;
     [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
     
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];

@@ -20,7 +20,10 @@ extern const char kMetalFGIsSyntheticKey;
 @property (nonatomic, readonly) MTLPixelFormat pixelFormat;
 @property (nonatomic, readonly) BOOL isReady;
 
-// Debug settings
+// Dynamic tuning parameters
+@property (nonatomic, assign) float motionScale;             // Default 0.42 (timeOffsetFactor)
+@property (nonatomic, assign) float disocclusionThreshold;   // Default 0.22 (color distance cutoff)
+@property (nonatomic, assign) float uiSensitivity;           // Default 0.035 (static UI threshold)
 @property (nonatomic, assign) BOOL debugTintEnabled;
 
 // Lifecycle

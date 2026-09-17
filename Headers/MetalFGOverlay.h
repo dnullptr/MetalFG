@@ -13,6 +13,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)updateWithNativeFPS:(double)nativeFps
                syntheticFPS:(double)syntheticFps;
 
+// Open/close the live tuning panel
+- (void)toggleTuningPanel;
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -34,11 +34,127 @@
     return sShared;
 }
 
+static NSString * const kRootlessPrefsPath = @"/var/jb/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist";
+static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist";
+
+- (NSString *)preferencesFilePath {
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+        return kRootlessPrefsPath;
+    }
+    return kStandardPrefsPath;
+}
+
+- (void)loadPreferences {
+    NSString *path = [self preferencesFilePath];
+    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
+    if (dict) {
+        if (dict[@"isEnabled"] != nil) {
+            _isEnabled = [dict[@"isEnabled"] boolValue];
+        } else {
+            _isEnabled = YES;
+        }
+        if (dict[@"currentPreset"] != nil) {
+            _currentPreset = [dict[@"currentPreset"] integerValue];
+        } else {
+            _currentPreset = 1; // Balanced
+        }
+        if (dict[@"motionScale"] != nil) {
+            _motionScale = [dict[@"motionScale"] floatValue];
+        } else {
+            _motionScale = 0.42f;
+        }
+        if (dict[@"disocclusionThreshold"] != nil) {
+            _disocclusionThreshold = [dict[@"disocclusionThreshold"] floatValue];
+        } else {
+            _disocclusionThreshold = 0.22f;
+        }
+        if (dict[@"uiSensitivity"] != nil) {
+            _uiSensitivity = [dict[@"uiSensitivity"] floatValue];
+        } else {
+            _uiSensitivity = 0.035f;
+        }
+    } else {
+        _isEnabled = YES;
+        _currentPreset = 1;
+        _motionScale = 0.42f;
+        _disocclusionThreshold = 0.22f;
+        _uiSensitivity = 0.035f;
+    }
+}
+
+- (void)savePreferences {
+    NSString *path = [self preferencesFilePath];
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    dict[@"isEnabled"] = @(_isEnabled);
+    dict[@"currentPreset"] = @(_currentPreset);
+    dict[@"motionScale"] = @(_motionScale);
+    dict[@"disocclusionThreshold"] = @(_disocclusionThreshold);
+    dict[@"uiSensitivity"] = @(_uiSensitivity);
+    [dict writeToFile:path atomically:YES];
+}
+
+- (void)applyPreset:(NSInteger)presetIndex {
+    _currentPreset = presetIndex;
+    switch (presetIndex) {
+        case 0: // Clear (anti-ghosting focus)
+            self.motionScale = 0.32f;
+            self.disocclusionThreshold = 0.16f;
+            self.uiSensitivity = 0.040f;
+            break;
+        case 1: // Balanced (default sweet spot)
+            self.motionScale = 0.42f;
+            self.disocclusionThreshold = 0.22f;
+            self.uiSensitivity = 0.035f;
+            break;
+        case 2: // Fluid (maximum motion)
+            self.motionScale = 0.50f;
+            self.disocclusionThreshold = 0.28f;
+            self.uiSensitivity = 0.030f;
+            break;
+        default:
+            break;
+    }
+    [self savePreferences];
+}
+
+- (void)setMotionScale:(float)motionScale {
+    _motionScale = motionScale;
+    os_unfair_lock_lock(&_syncLock);
+    if (_warper) {
+        _warper.motionScale = motionScale;
+    }
+    os_unfair_lock_unlock(&_syncLock);
+}
+
+- (void)setDisocclusionThreshold:(float)disocclusionThreshold {
+    _disocclusionThreshold = disocclusionThreshold;
+    os_unfair_lock_lock(&_syncLock);
+    if (_warper) {
+        _warper.disocclusionThreshold = disocclusionThreshold;
+    }
+    os_unfair_lock_unlock(&_syncLock);
+}
+
+- (void)setUiSensitivity:(float)uiSensitivity {
+    _uiSensitivity = uiSensitivity;
+    os_unfair_lock_lock(&_syncLock);
+    if (_warper) {
+        _warper.uiSensitivity = uiSensitivity;
+    }
+    os_unfair_lock_unlock(&_syncLock);
+}
+
+- (void)setIsEnabled:(BOOL)isEnabled {
+    _isEnabled = isEnabled;
+    [self savePreferences];
+}
+
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _isEnabled = YES;
-        _debugTint = NO;
         _syncLock = OS_UNFAIR_LOCK_INIT;
         _lastNativeFrameTime = 0.0;
         _shouldStopThread = NO;
@@ -47,6 +163,9 @@
         _nativeFrameCount = 0;
         _syntheticFrameCount = 0;
         _lastStatsLogTime = CACurrentMediaTime();
+        _debugTint = NO;
+        
+        [self loadPreferences];
         
         // Listen to app lifecycle events to avoid GPU crashes in background
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -101,6 +220,9 @@
     if (!_warper || _warper.device != device || _warper.pixelFormat != pixelFormat) {
         _warper = [[MetalFGWarper alloc] initWithDevice:device pixelFormat:pixelFormat];
         _warper.debugTintEnabled = _debugTint;
+        _warper.motionScale = _motionScale;
+        _warper.disocclusionThreshold = _disocclusionThreshold;
+        _warper.uiSensitivity = _uiSensitivity;
     }
     
     if (!_syncThread || !_syncThread.isExecuting) {
