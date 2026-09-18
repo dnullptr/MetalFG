@@ -39,6 +39,11 @@ extern const char kMetalFGIsSyntheticKey;
 - (BOOL)renderSyntheticFrameToDrawable:(id<CAMetalDrawable>)targetDrawable
                         targetTimeHint:(CFTimeInterval)targetTimeHint;
 
+// Unified 1:1 Phase-Locked Pipeline: capture, estimate motion, warp, and present in a single command buffer
+- (BOOL)synthesizeAndPresentWithSourceTexture:(id<MTLTexture>)sourceTexture
+                                        layer:(CAMetalLayer *)layer
+                                touchVelocity:(simd_float2)touchVelocity;
+
 // Check if a synthetic frame is currently processing on GPU
 - (BOOL)isGpuBusy;
 

@@ -36,6 +36,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 // Called by hooks whenever the game presents a native frame
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture
+                             layer:(nullable CAMetalLayer *)layer
+                       atTimestamp:(CFTimeInterval)timestamp;
+
+- (void)notifyNativeFramePresented:(id<MTLTexture>)texture
                        atTimestamp:(CFTimeInterval)timestamp
                        orientation:(simd_quatf)orientation;
 

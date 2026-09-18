@@ -19,6 +19,7 @@
     
     BOOL _isBackgrounded;
     BOOL _hasInjectedForCurrentNativeFrame;
+    dispatch_queue_t _fgQueue;
 }
 
 @end
@@ -165,6 +166,8 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         _lastStatsLogTime = CACurrentMediaTime();
         _debugTint = NO;
         
+        _fgQueue = dispatch_queue_create("com.metalfg.renderQueue", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+        
         [self loadPreferences];
         
         // Listen to app lifecycle events to avoid GPU crashes in background
@@ -257,11 +260,11 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         
         _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onDisplayTick:)];
         
-        // Target 120Hz ProMotion display refresh rate on iOS 15+
+        // CADisplayLink is strictly used for 1Hz framerate reporting and HUD stats
         if (@available(iOS 15.0, *)) {
-            _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(60.0f, 120.0f, 120.0f);
+            _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(30.0f, 60.0f, 60.0f);
         }
-        _displayLink.preferredFramesPerSecond = 120;
+        _displayLink.preferredFramesPerSecond = 60;
         
         [_displayLink addToRunLoop:currentRunLoop forMode:NSRunLoopCommonModes];
         
@@ -274,9 +277,9 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
 }
 
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture
-                       atTimestamp:(CFTimeInterval)timestamp
-                       orientation:(simd_quatf)orientation {
-    if (_isBackgrounded) return;
+                             layer:(nullable CAMetalLayer *)layer
+                       atTimestamp:(CFTimeInterval)timestamp {
+    if (_isBackgrounded || !texture) return;
     
     // Ignore small HUD textures (e.g. CAPerfHud / MetalHUD: typically < 250x150)
     if (texture.width < 250 || texture.height < 150) {
@@ -286,17 +289,45 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     os_unfair_lock_lock(&_syncLock);
     _lastNativeFrameTime = timestamp;
     _nativeFrameCount++;
-    _hasInjectedForCurrentNativeFrame = NO;
+    CAMetalLayer *targetLayer = layer ? layer : _activeLayer;
     MetalFGWarper *currentWarper = _warper;
     BOOL enabled = _isEnabled;
     os_unfair_lock_unlock(&_syncLock);
     
-    // Sample latest touch camera velocity prior
-    simd_float2 touchVel = [[MetalFGTouchTracker sharedTracker] normalizedVelocityForScreenSize:CGSizeMake(texture.width, texture.height)];
+    // Phase-Locked Direct Pipeline:
+    // Dispatch immediately when native frame finishes on GPU for 1:1 alternating VSYNC cadence
+    if (enabled && currentWarper && targetLayer) {
+        simd_float2 touchVel = [[MetalFGTouchTracker sharedTracker] normalizedVelocityForScreenSize:CGSizeMake(texture.width, texture.height)];
+        dispatch_async(_fgQueue, ^{
+            [self executePhaseLockedGenerationWithTexture:texture layer:targetLayer touchVelocity:touchVel];
+        });
+    }
+}
+
+- (void)notifyNativeFramePresented:(id<MTLTexture>)texture
+                       atTimestamp:(CFTimeInterval)timestamp
+                       orientation:(simd_quatf)orientation {
+    [self notifyNativeFramePresented:texture layer:_activeLayer atTimestamp:timestamp];
+}
+
+- (void)executePhaseLockedGenerationWithTexture:(id<MTLTexture>)texture
+                                          layer:(CAMetalLayer *)layer
+                                  touchVelocity:(simd_float2)touchVelocity {
+    os_unfair_lock_lock(&_syncLock);
+    MetalFGWarper *warper = _warper;
+    BOOL enabled = _isEnabled;
+    BOOL backgrounded = _isBackgrounded;
+    os_unfair_lock_unlock(&_syncLock);
     
-    // Copy the rendered game frame into double-buffered cache and dispatch BME
-    if (enabled && currentWarper && texture) {
-        [currentWarper captureBaseTexture:texture withTimestamp:timestamp touchVelocity:touchVel];
+    if (!enabled || backgrounded || !warper || !layer) return;
+    
+    BOOL rendered = [warper synthesizeAndPresentWithSourceTexture:texture
+                                                            layer:layer
+                                                    touchVelocity:touchVelocity];
+    if (rendered) {
+        os_unfair_lock_lock(&_syncLock);
+        _syntheticFrameCount++;
+        os_unfair_lock_unlock(&_syncLock);
     }
 }
 
@@ -304,79 +335,24 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     @autoreleasepool {
         if (_isBackgrounded) return;
         
-        // Periodic FPS logging & On-Screen Overlay update (every 1.0s, evaluated on every tick)
+        // Periodic FPS logging & On-Screen Overlay update (every 1.0s, evaluated on display link tick)
         CFTimeInterval statsNow = CACurrentMediaTime();
         if (statsNow - _lastStatsLogTime >= 1.0) {
             double duration = statsNow - _lastStatsLogTime;
+            
+            os_unfair_lock_lock(&_syncLock);
             double nativeFps = (double)_nativeFrameCount / duration;
             double syntheticFps = (double)_syntheticFrameCount / duration;
+            _nativeFrameCount = 0;
+            _syntheticFrameCount = 0;
+            _lastStatsLogTime = statsNow;
+            os_unfair_lock_unlock(&_syncLock);
             
             // Update floating on-screen indicator
             [[MetalFGOverlay sharedOverlay] updateWithNativeFPS:nativeFps syntheticFPS:syntheticFps];
             
             NSLog(@"[MetalFG] Performance: Native: %.1f FPS | Synthetic: %.1f FPS | Total: %.1f FPS",
                   nativeFps, syntheticFps, nativeFps + syntheticFps);
-            
-            _nativeFrameCount = 0;
-            _syntheticFrameCount = 0;
-            _lastStatsLogTime = statsNow;
-        }
-        
-        // If Frame Generation toggle is OFF, skip synthetic frame injection completely
-        if (!_isEnabled) {
-            return;
-        }
-        
-        os_unfair_lock_lock(&_syncLock);
-        CFTimeInterval lastNative = _lastNativeFrameTime;
-        BOOL alreadyInjected = _hasInjectedForCurrentNativeFrame;
-        CAMetalLayer *layer = _activeLayer;
-        MetalFGWarper *warper = _warper;
-        os_unfair_lock_unlock(&_syncLock);
-        
-        if (!layer || !warper || !warper.isReady) return;
-        
-        // STRICT 1:1 FRAME PACING:
-        // Enforce exactly 1 synthetic frame per native frame.
-        if (alreadyInjected) {
-            return;
-        }
-        
-        // Ignore HUD/sub-layers smaller than 250x150
-        CGSize drawableSize = layer.drawableSize;
-        if (drawableSize.width < 250.0 || drawableSize.height < 150.0) {
-            return;
-        }
-        
-        // Idle guard: if no native frame has arrived in > 150ms (game paused, loading screen, or static menu)
-        CFTimeInterval now = CACurrentMediaTime();
-        if (now - lastNative > 0.150) {
-            return;
-        }
-        
-        // GPU Backpressure guard:
-        if ([warper isGpuBusy]) {
-            return;
-        }
-        
-        // Case 4: Intermediate VSYNC tick! (e.g. 4.0ms - 15.0ms since last native frame)
-        id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
-        if (!syntheticDrawable || !syntheticDrawable.texture) {
-            return;
-        }
-        
-        // Sample predicted presentation timestamp
-        CFTimeInterval targetPresentationTime = link.targetTimestamp;
-        
-        // Render and present the motion-interpolated synthetic frame
-        BOOL rendered = [warper renderSyntheticFrameToDrawable:syntheticDrawable
-                                                targetTimeHint:targetPresentationTime];
-        
-        if (rendered) {
-            _syntheticFrameCount++;
-            os_unfair_lock_lock(&_syncLock);
-            _hasInjectedForCurrentNativeFrame = YES;
-            os_unfair_lock_unlock(&_syncLock);
         }
     }
 }

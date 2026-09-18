@@ -178,11 +178,10 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     }
     
     CFTimeInterval now = CACurrentMediaTime();
-    simd_quatf identityQuat = simd_quaternion(0.0f, 0.0f, 0.0f, 1.0f);
     
     [[MetalFGSynchronizer sharedSynchronizer] notifyNativeFramePresented:texture
-                                                            atTimestamp:now
-                                                            orientation:identityQuat];
+                                                                   layer:drawable.layer
+                                                             atTimestamp:now];
 }
 
 // ============================================================================
@@ -190,10 +189,23 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 // ============================================================================
 %hook CAMetalDrawable
 
+- (void)present {
+    NSNumber *isSynthetic = objc_getAssociatedObject(self, &kMetalFGIsSyntheticKey);
+    if ((!isSynthetic || ![isSynthetic boolValue]) && [MetalFGSynchronizer sharedSynchronizer].isEnabled) {
+        [self presentAfterMinimumDuration:1.0 / 120.0];
+        return;
+    }
+    %orig;
+}
+
 - (void)presentAfterMinimumDuration:(CFTimeInterval)duration {
-    // If Frame Generation is active, divide minimum duration by 2 so synthetic frames can present at the midpoint
-    CFTimeInterval durationCap = [MetalFGSynchronizer sharedSynchronizer].isEnabled ? (duration / 2.0) : duration;
-    %orig(durationCap);
+    NSNumber *isSynthetic = objc_getAssociatedObject(self, &kMetalFGIsSyntheticKey);
+    if ((!isSynthetic || ![isSynthetic boolValue]) && [MetalFGSynchronizer sharedSynchronizer].isEnabled) {
+        CFTimeInterval durationCap = fmin(duration / 2.0, 1.0 / 120.0);
+        %orig(durationCap);
+        return;
+    }
+    %orig(duration);
 }
 
 %end
@@ -209,9 +221,16 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)presentDrawable:(id<MTLDrawable>)drawable {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-            ProcessNativePresentation(metalDrawable);
-        }];
+        NSNumber *isSynthetic = objc_getAssociatedObject(metalDrawable, &kMetalFGIsSyntheticKey);
+        if (!isSynthetic || ![isSynthetic boolValue]) {
+            [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+                ProcessNativePresentation(metalDrawable);
+            }];
+            if ([MetalFGSynchronizer sharedSynchronizer].isEnabled) {
+                [(id<MTLCommandBuffer>)self presentDrawable:drawable afterMinimumDuration:1.0 / 120.0];
+                return;
+            }
+        }
     }
     %orig(drawable);
 }
@@ -219,9 +238,12 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-            ProcessNativePresentation(metalDrawable);
-        }];
+        NSNumber *isSynthetic = objc_getAssociatedObject(metalDrawable, &kMetalFGIsSyntheticKey);
+        if (!isSynthetic || ![isSynthetic boolValue]) {
+            [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+                ProcessNativePresentation(metalDrawable);
+            }];
+        }
     }
     %orig(drawable, presentationTime);
 }
@@ -229,13 +251,19 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
     if ([drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
-        [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-            ProcessNativePresentation(metalDrawable);
-        }];
+        NSNumber *isSynthetic = objc_getAssociatedObject(metalDrawable, &kMetalFGIsSyntheticKey);
+        if (!isSynthetic || ![isSynthetic boolValue]) {
+            [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+                ProcessNativePresentation(metalDrawable);
+            }];
+            if ([MetalFGSynchronizer sharedSynchronizer].isEnabled) {
+                CFTimeInterval durationCap = fmin(duration / 2.0, 1.0 / 120.0);
+                %orig(drawable, durationCap);
+                return;
+            }
+        }
     }
-    // If Frame Generation is active, divide minimum duration by 2 so synthetic frames can present at the midpoint
-    CFTimeInterval durationCap = [MetalFGSynchronizer sharedSynchronizer].isEnabled ? (duration / 2.0) : duration;
-    %orig(drawable, durationCap);
+    %orig(drawable, duration);
 }
 
 %end

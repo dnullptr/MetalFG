@@ -52,74 +52,100 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     
     const float dUV = 0.004f;
     
-    // 1. ALWAYS test stationary candidate (0, 0) first (Zero Motion / Static UI candidate)
-    float errZero = 0.0f;
-    for (int py = -1; py <= 1; py++) {
-        for (int px = -1; px <= 1; px++) {
-            float2 uvCurr = centerUV + float2(px, py) * dUV;
-            float lCurr = rgb_to_luma(currTexture.sample(s, uvCurr));
-            float lPrev = rgb_to_luma(prevTexture.sample(s, uvCurr));
-            errZero += abs(lCurr - lPrev);
+    // Evaluate block error helper
+    auto evalBlock = [&](float2 candidate) -> float {
+        float error = 0.0f;
+        for (int py = -1; py <= 1; py++) {
+            for (int px = -1; px <= 1; px++) {
+                float2 uvCurr = centerUV + float2(px, py) * dUV;
+                float2 uvPrev = uvCurr - candidate;
+                float lCurr = rgb_to_luma(currTexture.sample(s, uvCurr));
+                float lPrev = rgb_to_luma(prevTexture.sample(s, uvPrev));
+                error += abs(lCurr - lPrev);
+            }
         }
-    }
-    errZero /= 9.0f;
+        return error / 9.0f;
+    };
     
-    // In HUD zones, give candidate (0, 0) a 50% extra threshold tolerance
-    float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.5f) : uniforms.uiThreshold;
+    // 1. ALWAYS test stationary candidate (0, 0) first (Zero Motion / Static UI candidate)
+    float errZero = evalBlock(float2(0.0f, 0.0f));
+    
+    // In HUD zones, give candidate (0, 0) extra threshold tolerance.
+    // In active gameplay center, allow subtle micro-motion (e.g. idle breathing, floating) to pass through.
+    float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.5f) : (uniforms.uiThreshold * 0.4f);
     if (errZero < effectiveThreshold) {
-        // Locked to stationary UI / background: zero displacement
         motionVectors.write(float4(0.0f, 0.0f, 0.0f, 1.0f), gid);
         return;
     }
     
-    // 2. Motion Search centered on Touch Camera Velocity Prior:
-    float2 prior = uniforms.touchVelocity;
-    float bestError = errZero; // (0, 0) is the baseline to beat
+    float bestError = errZero;
     float2 bestVector = float2(0.0f, 0.0f);
+    float2 prior = uniforms.touchVelocity;
     
-    float stepSize = uniforms.searchRadius / 4.0f;
-    
-    // 5x5 candidate search grid
-    for (int sy = -2; sy <= 2; sy++) {
-        for (int sx = -2; sx <= 2; sx++) {
-            float2 candidate = prior + float2(sx, sy) * stepSize;
-            
-            // Clamp candidate magnitude to max allowed displacement
+    // 2. Hierarchical 3-Tier Multi-Scale Search (25 candidate samples total)
+    // Tier 1: Coarse Search (~25-50 pixels in UV, captures fast camera whips)
+    float coarseStep = clamp(uniforms.searchRadius * 0.25f, 0.006f, 0.015f);
+    for (int sy = -1; sy <= 1; sy++) {
+        for (int sx = -1; sx <= 1; sx++) {
+            if (sx == 0 && sy == 0) continue;
+            float2 candidate = prior + float2(sx, sy) * coarseStep;
             float candLen = length(candidate);
-            if (candLen > uniforms.maxDisplacement) {
-                candidate = (candidate / candLen) * uniforms.maxDisplacement;
-            }
+            if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
             
-            float error = 0.0f;
-            for (int py = -1; py <= 1; py++) {
-                for (int px = -1; px <= 1; px++) {
-                    float2 uvCurr = centerUV + float2(px, py) * dUV;
-                    float2 uvPrev = uvCurr - candidate;
-                    
-                    float lCurr = rgb_to_luma(currTexture.sample(s, uvCurr));
-                    float lPrev = rgb_to_luma(prevTexture.sample(s, uvPrev));
-                    error += abs(lCurr - lPrev);
-                }
+            float err = evalBlock(candidate);
+            err += length(candidate - prior) * 0.02f;
+            if (isHUDZone) err += 0.04f;
+            if (err < bestError) {
+                bestError = err;
+                bestVector = candidate;
             }
-            error /= 9.0f;
+        }
+    }
+    
+    // Tier 2: Medium Search (~6-10 pixels in UV, captures character walking/running)
+    float medStep = coarseStep * 0.35f;
+    float2 baseMed = bestVector;
+    for (int sy = -1; sy <= 1; sy++) {
+        for (int sx = -1; sx <= 1; sx++) {
+            if (sx == 0 && sy == 0) continue;
+            float2 candidate = baseMed + float2(sx, sy) * medStep;
+            float candLen = length(candidate);
+            if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
             
-            // Regularization penalty for deviating from prior/zero to prevent noisy random matching
-            error += length(candidate - prior) * 0.03f;
-            if (isHUDZone) {
-                error += 0.04f; // Extra penalty for motion in HUD zones
+            float err = evalBlock(candidate);
+            err += length(candidate - prior) * 0.015f;
+            if (isHUDZone) err += 0.04f;
+            if (err < bestError) {
+                bestError = err;
+                bestVector = candidate;
             }
+        }
+    }
+    
+    // Tier 3: Micro Search (~1-2 pixels in UV, captures Paimon bobbing, idle floating, cloth simulation)
+    float microStep = medStep * 0.28f;
+    float2 baseMicro = bestVector;
+    for (int sy = -1; sy <= 1; sy++) {
+        for (int sx = -1; sx <= 1; sx++) {
+            if (sx == 0 && sy == 0) continue;
+            float2 candidate = baseMicro + float2(sx, sy) * microStep;
+            float candLen = length(candidate);
+            if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
             
-            if (error < bestError) {
-                bestError = error;
+            float err = evalBlock(candidate);
+            err += length(candidate - prior) * 0.01f;
+            if (isHUDZone) err += 0.04f;
+            if (err < bestError) {
+                bestError = err;
                 bestVector = candidate;
             }
         }
     }
     
     // False-motion rejection:
-    // If the best moving candidate does not beat stationary (0, 0) by at least 15%,
+    // If the best moving candidate does not beat stationary (0, 0) by at least 10%,
     // stay locked to stationary (0, 0) to eliminate noise on flat/subtle textures
-    if (bestError > errZero * 0.85f) {
+    if (bestError > errZero * 0.90f) {
         bestVector = float2(0.0f, 0.0f);
     }
     
