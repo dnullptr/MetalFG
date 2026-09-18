@@ -14,24 +14,18 @@ inline float rgb_to_luma(float4 c) {
     return dot(c.rgb, float3(0.299f, 0.587f, 0.114f));
 }
 
-// Evaluate block error helper
-inline float eval_block_luma(texture2d<float, access::sample> currTexture,
-                             texture2d<float, access::sample> prevTexture,
-                             float2 centerUV,
-                             float dUV,
-                             float2 candidate) {
+// Fast candidate evaluation using pre-sampled current frame luma in registers
+inline float eval_candidate_luma(texture2d<float, access::sample> prevTexture,
+                                const thread float2 uvsCurr[9],
+                                const thread float lCurr[9],
+                                float2 candidate) {
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     float error = 0.0f;
-    for (int py = -1; py <= 1; py++) {
-        for (int px = -1; px <= 1; px++) {
-            float2 uvCurr = centerUV + float2(px, py) * dUV;
-            float2 uvPrev = uvCurr - candidate;
-            float lCurr = rgb_to_luma(currTexture.sample(s, uvCurr));
-            float lPrev = rgb_to_luma(prevTexture.sample(s, uvPrev));
-            error += abs(lCurr - lPrev);
-        }
+    for (int i = 0; i < 9; i++) {
+        float lPrev = rgb_to_luma(prevTexture.sample(s, uvsCurr[i] - candidate));
+        error += abs(lCurr[i] - lPrev);
     }
-    return error / 9.0f;
+    return error * (1.0f / 9.0f);
 }
 
 // ============================================================================
@@ -46,7 +40,7 @@ vertex RasterizerData metalfg_vertex(uint vertexID [[vertex_id]],
 }
 
 // ============================================================================
-// Compute Kernel 1: Screen-Space Block Motion Estimation (BME) & UI Anchoring
+// Compute Kernel 1: Concentric Multi-Radius Optical Flow & UI Anchoring
 // ============================================================================
 kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]],
                                            texture2d<float, access::sample> prevTexture [[texture(MetalFGBMETexturePrev)]],
@@ -61,20 +55,29 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     float2 centerUV = (float2(gid) + 0.5f) / float2(uniforms.gridDimensions);
     
     // Identify standard mobile HUD / UI anchor zones:
-    // Top bar (y < 0.18): Minimap, menu, team status
-    // Bottom-left (x < 0.35, y > 0.55): Virtual joystick
-    // Bottom-right (x > 0.65, y > 0.55): Attack, elemental skill, jump buttons
     bool isHUDZone = (centerUV.y < 0.18f) ||
                      (centerUV.x < 0.35f && centerUV.y > 0.55f) ||
                      (centerUV.x > 0.65f && centerUV.y > 0.55f);
     
     const float dUV = 0.002f;
+    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     
-    // 1. ALWAYS test stationary candidate (0, 0) first (Zero Motion / Static UI candidate)
-    float errZero = eval_block_luma(currTexture, prevTexture, centerUV, dUV, float2(0.0f, 0.0f));
+    // 1. Pre-cache 9 luma samples of current frame in fast registers
+    float2 uvsCurr[9];
+    float lCurr[9];
+    int idx = 0;
+    for (int py = -1; py <= 1; py++) {
+        for (int px = -1; px <= 1; px++) {
+            uvsCurr[idx] = centerUV + float2(px, py) * dUV;
+            lCurr[idx] = rgb_to_luma(currTexture.sample(s, uvsCurr[idx]));
+            idx++;
+        }
+    }
     
-    // In HUD zones, give candidate (0, 0) extra threshold tolerance.
-    // In active gameplay center, allow subtle micro-motion (e.g. idle breathing, floating) to pass through.
+    // 2. ALWAYS test stationary candidate (0, 0) first (Zero Motion / Static UI candidate)
+    float errZero = eval_candidate_luma(prevTexture, uvsCurr, lCurr, float2(0.0f, 0.0f));
+    
+    // Static UI anchoring
     float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.5f) : (uniforms.uiThreshold * 0.25f);
     if (errZero < effectiveThreshold) {
         motionVectors.write(float4(0.0f, 0.0f, 0.0f, 1.0f), gid);
@@ -85,69 +88,96 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     float2 bestVector = float2(0.0f, 0.0f);
     float2 prior = uniforms.touchVelocity;
     
-    // 2. Hierarchical 3-Tier Multi-Scale Search (25 candidate samples total)
-    // Tier 1: Coarse Search (~25-50 pixels in UV, captures fast camera whips)
-    float coarseStep = clamp(uniforms.searchRadius * 0.25f, 0.006f, 0.015f);
-    for (int sy = -1; sy <= 1; sy++) {
-        for (int sx = -1; sx <= 1; sx++) {
-            if (sx == 0 && sy == 0) continue;
-            float2 candidate = prior + float2(sx, sy) * coarseStep;
-            float candLen = length(candidate);
-            if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
-            
-            float err = eval_block_luma(currTexture, prevTexture, centerUV, dUV, candidate);
-            err += length(candidate - prior) * 0.02f;
-            if (isHUDZone) err += 0.04f;
-            if (err < bestError) {
-                bestError = err;
-                bestVector = candidate;
-            }
+    // 3. Concentric Multi-Radius Search (Zero Blind Spots)
+    // Evaluates 4 concentric rings to capture all velocity ranges directly:
+    // Ring 1 (Micro: ~1.5px): Floating companion (Paimon), breathing, cloth simulation
+    // Ring 2 (Sub-Medium: ~4.5px): Walking, slow camera drift
+    // Ring 3 (Medium-Fast: ~10px): Running, active camera pan
+    // Ring 4 (Coarse: ~22px): Quick swipes, fast camera rotation
+    
+    const float r1 = 0.0012f;
+    const float r2 = 0.0035f;
+    const float r3 = 0.0080f;
+    const float r4 = clamp(uniforms.searchRadius * 0.50f, 0.015f, uniforms.maxDisplacement);
+    
+    // 8-directional normalized vectors
+    const float2 dirs[8] = {
+        float2( 1.0f,  0.0f), float2(-1.0f,  0.0f),
+        float2( 0.0f,  1.0f), float2( 0.0f, -1.0f),
+        float2( 0.7071f,  0.7071f), float2(-0.7071f,  0.7071f),
+        float2( 0.7071f, -0.7071f), float2(-0.7071f, -0.7071f)
+    };
+    
+    // Test prior candidate if provided
+    if (dot(prior, prior) > 1e-6f) {
+        float errPrior = eval_candidate_luma(prevTexture, uvsCurr, lCurr, prior);
+        if (errPrior < bestError) {
+            bestError = errPrior;
+            bestVector = prior;
         }
     }
     
-    // Tier 2: Medium Search (~6-10 pixels in UV, captures character walking/running)
-    float medStep = coarseStep * 0.35f;
-    float2 baseMed = bestVector;
-    for (int sy = -1; sy <= 1; sy++) {
-        for (int sx = -1; sx <= 1; sx++) {
-            if (sx == 0 && sy == 0) continue;
-            float2 candidate = baseMed + float2(sx, sy) * medStep;
-            float candLen = length(candidate);
-            if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
-            
-            float err = eval_block_luma(currTexture, prevTexture, centerUV, dUV, candidate);
-            err += length(candidate - prior) * 0.015f;
-            if (isHUDZone) err += 0.04f;
-            if (err < bestError) {
-                bestError = err;
-                bestVector = candidate;
-            }
+    // Search Ring 1: Micro-motion (captures subtle floating / idle bobbing)
+    for (int i = 0; i < 8; i++) {
+        float2 cand = dirs[i] * r1;
+        float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);
+        if (isHUDZone) err += 0.04f;
+        if (err < bestError) {
+            bestError = err;
+            bestVector = cand;
         }
     }
     
-    // Tier 3: Micro Search (~1-2 pixels in UV, captures Paimon bobbing, idle floating, cloth simulation)
-    float microStep = medStep * 0.25f;
-    float2 baseMicro = bestVector;
-    for (int sy = -1; sy <= 1; sy++) {
-        for (int sx = -1; sx <= 1; sx++) {
-            if (sx == 0 && sy == 0) continue;
-            float2 candidate = baseMicro + float2(sx, sy) * microStep;
-            float candLen = length(candidate);
-            if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
-            
-            float err = eval_block_luma(currTexture, prevTexture, centerUV, dUV, candidate);
-            err += length(candidate - prior) * 0.01f;
-            if (isHUDZone) err += 0.04f;
+    // Search Ring 2: Sub-Medium motion (walking / gentle movement)
+    for (int i = 0; i < 8; i++) {
+        float2 cand = dirs[i] * r2;
+        float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);
+        if (isHUDZone) err += 0.04f;
+        if (err < bestError) {
+            bestError = err;
+            bestVector = cand;
+        }
+    }
+    
+    // Search Ring 3: Medium-Fast motion (running / standard camera pans)
+    for (int i = 0; i < 8; i++) {
+        float2 cand = dirs[i] * r3;
+        float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);
+        if (isHUDZone) err += 0.04f;
+        if (err < bestError) {
+            bestError = err;
+            bestVector = cand;
+        }
+    }
+    
+    // Search Ring 4: Coarse motion around prior or origin
+    float2 coarseBase = (dot(prior, prior) > 1e-6f) ? prior : float2(0.0f, 0.0f);
+    for (int i = 0; i < 8; i++) {
+        float2 cand = coarseBase + dirs[i] * r4;
+        float candLen = length(cand);
+        if (candLen > uniforms.maxDisplacement) cand = (cand / candLen) * uniforms.maxDisplacement;
+        float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);
+        if (isHUDZone) err += 0.04f;
+        if (err < bestError) {
+            bestError = err;
+            bestVector = cand;
+        }
+    }
+    
+    // Fine Sub-Pixel Refinement around best candidate
+    if (dot(bestVector, bestVector) > 1e-7f) {
+        float refineStep = r1 * 0.5f;
+        for (int i = 0; i < 4; i++) {
+            float2 cand = bestVector + dirs[i] * refineStep;
+            float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);
             if (err < bestError) {
                 bestError = err;
-                bestVector = candidate;
+                bestVector = cand;
             }
         }
     }
     
     // False-motion rejection:
-    // If the best moving candidate does not beat stationary (0, 0),
-    // stay locked to stationary (0, 0) to eliminate noise on flat textures
     if (bestError >= errZero * 0.97f) {
         bestVector = float2(0.0f, 0.0f);
     }
@@ -162,22 +192,8 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
 }
 
 // ============================================================================
-// Compute Kernel 2: 3x3 Spatial Median Filter (Kills Boiling Shimmer)
+// Compute Kernel 2: 3x3 L1 Vector Median Filter (Preserves True Motion Angles)
 // ============================================================================
-inline float median9(float p[9]) {
-    // Fast register-based sorting network for 9 scalar values
-    for (int i = 0; i < 5; i++) {
-        for (int j = i + 1; j < 9; j++) {
-            if (p[j] < p[i]) {
-                float tmp = p[i];
-                p[i] = p[j];
-                p[j] = tmp;
-            }
-        }
-    }
-    return p[4];
-}
-
 kernel void metalfg_motion_median_filter(uint2 gid [[thread_position_in_grid]],
                                         texture2d<float, access::read> inVectors [[texture(MetalFGSmoothTextureInput)]],
                                         texture2d<float, access::write> outVectors [[texture(MetalFGSmoothTextureOutput)]]) {
@@ -185,25 +201,34 @@ kernel void metalfg_motion_median_filter(uint2 gid [[thread_position_in_grid]],
     uint height = inVectors.get_height();
     if (gid.x >= width || gid.y >= height) return;
     
-    float vx[9];
-    float vy[9];
+    float2 vectors[9];
     int idx = 0;
     
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             int cx = clamp(int(gid.x) + dx, 0, int(width) - 1);
             int cy = clamp(int(gid.y) + dy, 0, int(height) - 1);
-            float2 v = inVectors.read(uint2(cx, cy)).xy;
-            vx[idx] = v.x;
-            vy[idx] = v.y;
+            vectors[idx] = inVectors.read(uint2(cx, cy)).xy;
             idx++;
         }
     }
     
-    float medX = median9(vx);
-    float medY = median9(vy);
+    // L1 Vector Median: Find vector v_i minimizing sum of Euclidean distances to all neighbors
+    float minDistanceSum = 1e9f;
+    int bestIndex = 4; // Center pixel default
     
-    outVectors.write(float4(medX, medY, 0.0f, 1.0f), gid);
+    for (int i = 0; i < 9; i++) {
+        float distSum = 0.0f;
+        for (int j = 0; j < 9; j++) {
+            distSum += distance(vectors[i], vectors[j]);
+        }
+        if (distSum < minDistanceSum) {
+            minDistanceSum = distSum;
+            bestIndex = i;
+        }
+    }
+    
+    outVectors.write(float4(vectors[bestIndex], 0.0f, 1.0f), gid);
 }
 
 // ============================================================================
