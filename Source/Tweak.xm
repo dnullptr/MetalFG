@@ -137,8 +137,6 @@ static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
 // ============================================================================
 // Helper: Process Native Frame Presentation
 // ============================================================================
-static char kMetalFGProcessedKey;
-
 static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     if (!drawable) return;
     
@@ -147,12 +145,6 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
     if (isSynthetic && [isSynthetic boolValue]) {
         return;
     }
-    
-    // 2. Deduplication guard: do not process the same drawable twice in one frame
-    if (objc_getAssociatedObject(drawable, &kMetalFGProcessedKey)) {
-        return;
-    }
-    objc_setAssociatedObject(drawable, &kMetalFGProcessedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
     id<MTLTexture> texture = drawable.texture;
     if (!texture) return;

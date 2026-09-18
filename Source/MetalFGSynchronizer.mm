@@ -61,7 +61,7 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         if (dict[@"motionScale"] != nil) {
             _motionScale = [dict[@"motionScale"] floatValue];
         } else {
-            _motionScale = 0.42f;
+            _motionScale = 0.50f;
         }
         if (dict[@"disocclusionThreshold"] != nil) {
             _disocclusionThreshold = [dict[@"disocclusionThreshold"] floatValue];
@@ -76,7 +76,7 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     } else {
         _isEnabled = YES;
         _currentPreset = 1;
-        _motionScale = 0.42f;
+        _motionScale = 0.50f;
         _disocclusionThreshold = 0.22f;
         _uiSensitivity = 0.035f;
     }
@@ -100,19 +100,19 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     _currentPreset = presetIndex;
     switch (presetIndex) {
         case 0: // Clear (anti-ghosting focus)
-            self.motionScale = 0.32f;
+            self.motionScale = 0.35f;
             self.disocclusionThreshold = 0.16f;
             self.uiSensitivity = 0.040f;
             break;
         case 1: // Balanced (default sweet spot)
-            self.motionScale = 0.42f;
+            self.motionScale = 0.50f;
             self.disocclusionThreshold = 0.22f;
             self.uiSensitivity = 0.035f;
             break;
         case 2: // Fluid (maximum motion)
             self.motionScale = 0.50f;
             self.disocclusionThreshold = 0.28f;
-            self.uiSensitivity = 0.030f;
+            self.uiSensitivity = 0.025f;
             break;
         default:
             break;
@@ -259,7 +259,7 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         
         // Target 120Hz ProMotion display refresh rate on iOS 15+
         if (@available(iOS 15.0, *)) {
-            _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(120.0f, 120.0f, 120.0f);
+            _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(60.0f, 120.0f, 120.0f);
         }
         _displayLink.preferredFramesPerSecond = 120;
         
@@ -351,14 +351,6 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         
         CFTimeInterval now = CACurrentMediaTime();
         CFTimeInterval elapsed = now - lastNative;
-        
-        // Midpoint Pacing Guard:
-        // For a 60 FPS native game (~16.6ms per frame), the midpoint VSYNC is at ~8.33ms.
-        // If this tick occurs too close to the native frame (< 5.0ms), it belongs to the
-        // native frame's own VSYNC slot, so wait for the intermediate tick!
-        if (elapsed < 0.005) {
-            return;
-        }
         
         // Idle guard: if no native frame has arrived in > 150ms (paused, loading, static UI)
         if (elapsed > 0.150) {

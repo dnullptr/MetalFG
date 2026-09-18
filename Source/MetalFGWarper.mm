@@ -75,9 +75,9 @@ static NSString * const kEmbeddedMetalSource = @""
 "    if (gid.x >= uniforms.gridDimensions.x || gid.y >= uniforms.gridDimensions.y) return;\n"
 "    float2 centerUV = (float2(gid) + 0.5f) / float2(uniforms.gridDimensions);\n"
 "    bool isHUDZone = (centerUV.y < 0.18f) || (centerUV.x < 0.35f && centerUV.y > 0.55f) || (centerUV.x > 0.65f && centerUV.y > 0.55f);\n"
-"    const float dUV = 0.004f;\n"
+"    const float dUV = 0.002f;\n"
 "    float errZero = eval_block_luma(currTexture, prevTexture, centerUV, dUV, float2(0.0f, 0.0f));\n"
-"    float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.5f) : (uniforms.uiThreshold * 0.4f);\n"
+"    float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.5f) : (uniforms.uiThreshold * 0.25f);\n"
 "    if (errZero < effectiveThreshold) {\n"
 "        motionVectors.write(float4(0.0f, 0.0f, 0.0f, 1.0f), gid);\n"
 "        return;\n"
@@ -112,7 +112,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "            if (err < bestError) { bestError = err; bestVector = candidate; }\n"
 "        }\n"
 "    }\n"
-"    float microStep = medStep * 0.28f;\n"
+"    float microStep = medStep * 0.25f;\n"
 "    float2 baseMicro = bestVector;\n"
 "    for (int sy = -1; sy <= 1; sy++) {\n"
 "        for (int sx = -1; sx <= 1; sx++) {\n"
@@ -126,7 +126,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "            if (err < bestError) { bestError = err; bestVector = candidate; }\n"
 "        }\n"
 "    }\n"
-"    if (bestError > errZero * 0.90f) {\n"
+"    if (bestError >= errZero * 0.97f) {\n"
 "        bestVector = float2(0.0f, 0.0f);\n"
 "    }\n"
 "    float finalLen = length(bestVector);\n"
@@ -171,14 +171,15 @@ static NSString * const kEmbeddedMetalSource = @""
 "    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);\n"
 "    float4 origColor = sourceTexture.sample(linearSampler, in.texCoords);\n"
 "    float2 mv = motionVectors.sample(linearSampler, in.texCoords).xy;\n"
-"    if (dot(mv, mv) < 1e-7f) {\n"
+"    float mvLenSq = dot(mv, mv);\n"
+"    if (mvLenSq < 1e-7f) {\n"
 "        return origColor;\n"
 "    }\n"
-"    float2 warpedUV = in.texCoords - mv * uniforms.timeOffsetFactor;\n"
+"    float2 warpedUV = clamp(in.texCoords - mv * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));\n"
 "    float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);\n"
-"    float colorDist = distance(warpedColor.rgb, origColor.rgb);\n"
-"    float threshold = uniforms.disocclusionThreshold;\n"
-"    float4 finalColor = mix(origColor, warpedColor, confidence);\n"
+"    float mvMag = sqrt(mvLenSq);\n"
+"    float motionWeight = smoothstep(0.0005f, 0.0025f, mvMag);\n"
+"    float4 finalColor = mix(origColor, warpedColor, motionWeight);\n"
 "    if (uniforms.pad[0] > 0.5f) {\n"
 "        finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);\n"
 "    }\n"
@@ -237,7 +238,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         _hasValidBaseFrame = NO;
         _inFlightGpuFrames = 0;
         _debugTintEnabled = NO;
-        _motionScale = 0.42f;
+        _motionScale = 0.50f;
         _disocclusionThreshold = 0.22f;
         _uiSensitivity = 0.035f;
         
@@ -266,13 +267,19 @@ static const MetalFGVertex kQuadVertices[6] = {
     NSError *error = nil;
     id<MTLLibrary> library = nil;
     
-    // 1. Try loading compiled metallib from rootless directory
-    NSString *rootlessMetallibPath = @"/var/jb/Library/Application Support/MetalFG/default.metallib";
-    if ([[NSFileManager defaultManager] fileExistsAtPath:rootlessMetallibPath]) {
-        NSURL *url = [NSURL fileURLWithPath:rootlessMetallibPath];
-        library = [_device newLibraryWithURL:url error:&error];
-        if (library) {
-            NSLog(@"[MetalFG] Loaded precompiled shader library from %@", rootlessMetallibPath);
+    // 1. Try loading compiled metallib from rootless or rootful directories
+    NSArray<NSString *> *searchPaths = @[
+        @"/var/jb/Library/Application Support/MetalFG/default.metallib",
+        @"/Library/Application Support/MetalFG/default.metallib"
+    ];
+    for (NSString *path in searchPaths) {
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            NSURL *url = [NSURL fileURLWithPath:path];
+            library = [_device newLibraryWithURL:url error:&error];
+            if (library) {
+                NSLog(@"[MetalFG] Loaded precompiled shader library from %@", path);
+                break;
+            }
         }
     }
     

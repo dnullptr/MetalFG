@@ -68,14 +68,14 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
                      (centerUV.x < 0.35f && centerUV.y > 0.55f) ||
                      (centerUV.x > 0.65f && centerUV.y > 0.55f);
     
-    const float dUV = 0.004f;
+    const float dUV = 0.002f;
     
     // 1. ALWAYS test stationary candidate (0, 0) first (Zero Motion / Static UI candidate)
     float errZero = eval_block_luma(currTexture, prevTexture, centerUV, dUV, float2(0.0f, 0.0f));
     
     // In HUD zones, give candidate (0, 0) extra threshold tolerance.
     // In active gameplay center, allow subtle micro-motion (e.g. idle breathing, floating) to pass through.
-    float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.5f) : (uniforms.uiThreshold * 0.4f);
+    float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.5f) : (uniforms.uiThreshold * 0.25f);
     if (errZero < effectiveThreshold) {
         motionVectors.write(float4(0.0f, 0.0f, 0.0f, 1.0f), gid);
         return;
@@ -126,7 +126,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     }
     
     // Tier 3: Micro Search (~1-2 pixels in UV, captures Paimon bobbing, idle floating, cloth simulation)
-    float microStep = medStep * 0.28f;
+    float microStep = medStep * 0.25f;
     float2 baseMicro = bestVector;
     for (int sy = -1; sy <= 1; sy++) {
         for (int sx = -1; sx <= 1; sx++) {
@@ -146,9 +146,9 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     }
     
     // False-motion rejection:
-    // If the best moving candidate does not beat stationary (0, 0) by at least 10%,
-    // stay locked to stationary (0, 0) to eliminate noise on flat/subtle textures
-    if (bestError > errZero * 0.90f) {
+    // If the best moving candidate does not beat stationary (0, 0),
+    // stay locked to stationary (0, 0) to eliminate noise on flat textures
+    if (bestError >= errZero * 0.97f) {
         bestVector = float2(0.0f, 0.0f);
     }
     
@@ -207,7 +207,7 @@ kernel void metalfg_motion_median_filter(uint2 gid [[thread_position_in_grid]],
 }
 
 // ============================================================================
-// Fragment Shader: Motion-Compensated Forward Warping with Disocclusion Rejection
+// Fragment Shader: Motion-Compensated Forward Warping with Smooth Boundary Ramp
 // ============================================================================
 fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
                                  texture2d<float, access::sample> sourceTexture [[texture(MetalFGTextureIndexSource)]],
@@ -222,26 +222,22 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     // Bilinearly sample the spatially smoothed motion vector field
     float2 mv = motionVectors.sample(linearSampler, in.texCoords).xy;
     
-    // Static UI check: If motion vector is zero, return untouched original color (zero blur, zero distortion)
-    if (dot(mv, mv) < 1e-7f) {
+    // Static UI check: Zero motion -> bit-exact passthrough
+    float mvLenSq = dot(mv, mv);
+    if (mvLenSq < 1e-7f) {
         return origColor;
     }
     
-    // Backward mapping: To find the pixel value at in.texCoords at time t + 0.5,
-    // we must look backward into the source frame at in.texCoords - mv * uniforms.timeOffsetFactor!
-    float2 warpedUV = in.texCoords - mv * uniforms.timeOffsetFactor;
+    float2 warpedUV = clamp(in.texCoords - mv * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));
     float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);
     
-    // Disocclusion Rejection:
-    // When moving edges reveal new background or when motion estimation fails,
-    // warpedColor and origColor diverge significantly.
-    // Use a tight transition around disocclusionThreshold so pixels are either
-    // crisply warped or cleanly clamped without 50/50 ghost transparency.
-    float colorDist = distance(warpedColor.rgb, origColor.rgb);
-    float threshold = uniforms.disocclusionThreshold;
-    float confidence = smoothstep(threshold, threshold * 0.35f, colorDist);
+    // Seamless transition at motion boundaries:
+    // Linearly blend from static origColor to solid warpedColor over a subtle motion threshold.
+    // NO ghosting, NO double-image, NO color-distance rejection that tears moving edges!
+    float mvMag = sqrt(mvLenSq);
+    float motionWeight = smoothstep(0.0005f, 0.0025f, mvMag);
+    float4 finalColor = mix(origColor, warpedColor, motionWeight);
     
-    float4 finalColor = mix(origColor, warpedColor, confidence);
     if (uniforms.pad[0] > 0.5f) {
         finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);
     }
