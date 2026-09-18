@@ -117,9 +117,6 @@ static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
         if (self.framebufferOnly) {
             self.framebufferOnly = NO;
         }
-        if (@available(iOS 15.0, *)) {
-            self.preferredFrameRateRange = CAFrameRateRangeMake(120.0f, 120.0f, 120.0f);
-        }
         if (@available(iOS 16.0, *)) {
             self.allowsNextDrawableTimeout = YES;
         }
