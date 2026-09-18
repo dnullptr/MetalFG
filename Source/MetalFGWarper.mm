@@ -106,26 +106,30 @@ static NSString * const kEmbeddedMetalSource = @""
 "        float errPrior = eval_candidate_luma(prevTexture, uvsCurr, lCurr, prior);\n"
 "        if (errPrior < bestError) { bestError = errPrior; bestVector = prior; }\n"
 "    }\n"
-"    for (int i = 0; i < 8; i++) {\n"
+"    // Ring 1 (Micro: 4 cardinal)\n"
+"    for (int i = 0; i < 4; i++) {\n"
 "        float2 cand = dirs[i] * r1;\n"
 "        float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);\n"
 "        if (isHUDZone) err += 0.04f;\n"
 "        if (err < bestError) { bestError = err; bestVector = cand; }\n"
 "    }\n"
+"    // Ring 2 (Sub-Medium: 8 directions)\n"
 "    for (int i = 0; i < 8; i++) {\n"
 "        float2 cand = dirs[i] * r2;\n"
 "        float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);\n"
 "        if (isHUDZone) err += 0.04f;\n"
 "        if (err < bestError) { bestError = err; bestVector = cand; }\n"
 "    }\n"
+"    // Ring 3 (Medium: 8 directions)\n"
 "    for (int i = 0; i < 8; i++) {\n"
 "        float2 cand = dirs[i] * r3;\n"
 "        float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);\n"
 "        if (isHUDZone) err += 0.04f;\n"
 "        if (err < bestError) { bestError = err; bestVector = cand; }\n"
 "    }\n"
+"    // Ring 4 (Coarse: 4 cardinal)\n"
 "    float2 coarseBase = (dot(prior, prior) > 1e-6f) ? prior : float2(0.0f, 0.0f);\n"
-"    for (int i = 0; i < 8; i++) {\n"
+"    for (int i = 0; i < 4; i++) {\n"
 "        float2 cand = coarseBase + dirs[i] * r4;\n"
 "        float candLen = length(cand);\n"
 "        if (candLen > uniforms.maxDisplacement) cand = (cand / candLen) * uniforms.maxDisplacement;\n"
@@ -371,8 +375,8 @@ static const MetalFGVertex kQuadVertices[6] = {
         MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:sourceTexture.pixelFormat
                                                                                          width:sourceTexture.width
                                                                                         height:sourceTexture.height
-                                                                                     mipmapped:YES];
-        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite;
+                                                                                     mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         desc.storageMode = MTLStorageModePrivate;
         
         for (int i = 0; i < 2; i++) {
@@ -429,7 +433,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     id<MTLCommandBuffer> cmdBuffer = [_commandQueue commandBuffer];
     cmdBuffer.label = @"com.metalfg.captureAndBME";
     
-    // Pass 1: Copy native frame into double-buffered cache and generate hardware mipmaps
+    // Pass 1: Copy native frame into double-buffered cache
     id<MTLBlitCommandEncoder> blit = [cmdBuffer blitCommandEncoder];
     [blit copyFromTexture:sourceTexture
               sourceSlice:0
@@ -440,7 +444,6 @@ static const MetalFGVertex kQuadVertices[6] = {
          destinationSlice:0
          destinationLevel:0
         destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit generateMipmapsForTexture:destTexture];
     [blit endEncoding];
     
     // Pass 2: Block Motion Estimation with Static UI Prior
@@ -544,12 +547,8 @@ static const MetalFGVertex kQuadVertices[6] = {
     // Tag synthetic drawable to prevent recursive presentation hooking
     objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // Phase-locked presentation: anchor to the exact target VSYNC timestamp predicted by CADisplayLink
-    if (targetTimeHint > 0.0) {
-        [cmdBuffer presentDrawable:targetDrawable atTime:targetTimeHint];
-    } else {
-        [cmdBuffer presentDrawable:targetDrawable];
-    }
+    // Present synthetic drawable directly for the 120Hz VSYNC tick without presentation queue locking
+    [cmdBuffer presentDrawable:targetDrawable];
     
     _inFlightGpuFrames.fetch_add(1);
     __weak MetalFGWarper *weakSelf = self;

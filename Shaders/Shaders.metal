@@ -117,8 +117,8 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         }
     }
     
-    // Search Ring 1: Micro-motion (captures subtle floating / idle bobbing)
-    for (int i = 0; i < 8; i++) {
+    // Search Ring 1: Micro-motion (captures subtle floating / idle bobbing: 4 cardinal directions)
+    for (int i = 0; i < 4; i++) {
         float2 cand = dirs[i] * r1;
         float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);
         if (isHUDZone) err += 0.04f;
@@ -128,7 +128,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         }
     }
     
-    // Search Ring 2: Sub-Medium motion (walking / gentle movement)
+    // Search Ring 2: Sub-Medium motion (walking / gentle movement: 8 directions)
     for (int i = 0; i < 8; i++) {
         float2 cand = dirs[i] * r2;
         float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);
@@ -139,7 +139,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         }
     }
     
-    // Search Ring 3: Medium-Fast motion (running / standard camera pans)
+    // Search Ring 3: Medium-Fast motion (running / standard camera pans: 8 directions)
     for (int i = 0; i < 8; i++) {
         float2 cand = dirs[i] * r3;
         float err = eval_candidate_luma(prevTexture, uvsCurr, lCurr, cand);
@@ -150,9 +150,9 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         }
     }
     
-    // Search Ring 4: Coarse motion around prior or origin
+    // Search Ring 4: Coarse motion around prior or origin (4 cardinal directions)
     float2 coarseBase = (dot(prior, prior) > 1e-6f) ? prior : float2(0.0f, 0.0f);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 4; i++) {
         float2 cand = coarseBase + dirs[i] * r4;
         float candLen = length(cand);
         if (candLen > uniforms.maxDisplacement) cand = (cand / candLen) * uniforms.maxDisplacement;

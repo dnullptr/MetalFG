@@ -1,7 +1,7 @@
 Package: com.dnullptr.metalfg
 Name: MetalFG
 Depends: mobilesubstrate (>= 0.9.5000)
-Version: 1.2.0
+Version: 1.2.1
 Architecture: iphoneos-arm64
 Description: High-performance GPU Frame Generation with Multi-Radius Optical Flow, L1 Vector Median Filter, Phase-Locked VSYNC Pacing, and Live Tuning Panel for Metal games on iOS 16 ProMotion devices.
 Maintainer: MetalFG Team
