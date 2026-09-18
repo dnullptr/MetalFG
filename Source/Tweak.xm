@@ -117,6 +117,9 @@ static inline BOOL IsGameLayerCandidate(CAMetalLayer *layer) {
         if (self.framebufferOnly) {
             self.framebufferOnly = NO;
         }
+        if (@available(iOS 15.0, *)) {
+            self.preferredFrameRateRange = CAFrameRateRangeMake(120.0f, 120.0f, 120.0f);
+        }
         if (@available(iOS 16.0, *)) {
             self.allowsNextDrawableTimeout = YES;
         }
@@ -192,7 +195,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)presentAfterMinimumDuration:(CFTimeInterval)duration {
     NSNumber *isSynthetic = objc_getAssociatedObject(self, &kMetalFGIsSyntheticKey);
     if ((!isSynthetic || ![isSynthetic boolValue]) && [MetalFGSynchronizer sharedSynchronizer].isEnabled) {
-        CFTimeInterval durationCap = fmin(duration / 2.0, 1.0 / 120.0);
+        CFTimeInterval durationCap = duration / 2.0;
         %orig(durationCap);
         return;
     }
@@ -244,7 +247,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
                 ProcessNativePresentation(metalDrawable);
             }];
             if ([MetalFGSynchronizer sharedSynchronizer].isEnabled) {
-                CFTimeInterval durationCap = fmin(duration / 2.0, 1.0 / 120.0);
+                CFTimeInterval durationCap = duration / 2.0;
                 %orig(drawable, durationCap);
                 return;
             }

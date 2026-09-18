@@ -1,9 +1,9 @@
 Package: com.dnullptr.metalfg
 Name: MetalFG
 Depends: mobilesubstrate (>= 0.9.5000)
-Version: 1.1.1
+Version: 1.1.2
 Architecture: iphoneos-arm64
-Description: Real-time GPU Frame Generation with Phase-Locked VSYNC Pacing, Micro-Motion BME Search, and Live Tuning Panel for Metal games on iOS 16 ProMotion devices.
+Description: Real-time GPU Frame Generation with True 120Hz ProMotion Midpoint Pacing, Micro-Motion BME Search, and Live Tuning Panel for Metal games on iOS 16 ProMotion devices.
 Maintainer: MetalFG Team
 Author: MetalFG Team
 Section: Tweaks

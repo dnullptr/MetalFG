@@ -88,7 +88,7 @@ jobs:
           artifacts: "./packages/*.deb"
           allowUpdates: true
           tag: nightly
-          name: "Nightly Build (v1.1.1 - run #${{ github.run_number }})"
+          name: "Nightly Build (v1.1.2 - run #${{ github.run_number }})"
           makeLatest: true
           body: |
             This build was automatically generated from the latest commit on `main`.

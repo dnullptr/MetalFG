@@ -241,5 +241,9 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     float threshold = uniforms.disocclusionThreshold;
     float confidence = smoothstep(threshold, threshold * 0.35f, colorDist);
     
-    return mix(origColor, warpedColor, confidence);
+    float4 finalColor = mix(origColor, warpedColor, confidence);
+    if (uniforms.pad[0] > 0.5f) {
+        finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);
+    }
+    return finalColor;
 }

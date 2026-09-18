@@ -19,7 +19,6 @@
     
     BOOL _isBackgrounded;
     BOOL _hasInjectedForCurrentNativeFrame;
-    dispatch_queue_t _fgQueue;
 }
 
 @end
@@ -166,8 +165,6 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         _lastStatsLogTime = CACurrentMediaTime();
         _debugTint = NO;
         
-        _fgQueue = dispatch_queue_create("com.metalfg.renderQueue", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
-        
         [self loadPreferences];
         
         // Listen to app lifecycle events to avoid GPU crashes in background
@@ -260,11 +257,11 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         
         _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onDisplayTick:)];
         
-        // CADisplayLink is strictly used for 1Hz framerate reporting and HUD stats
+        // Target 120Hz ProMotion display refresh rate on iOS 15+
         if (@available(iOS 15.0, *)) {
-            _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(30.0f, 60.0f, 60.0f);
+            _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(120.0f, 120.0f, 120.0f);
         }
-        _displayLink.preferredFramesPerSecond = 60;
+        _displayLink.preferredFramesPerSecond = 120;
         
         [_displayLink addToRunLoop:currentRunLoop forMode:NSRunLoopCommonModes];
         
@@ -289,18 +286,17 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     os_unfair_lock_lock(&_syncLock);
     _lastNativeFrameTime = timestamp;
     _nativeFrameCount++;
-    CAMetalLayer *targetLayer = layer ? layer : _activeLayer;
+    _hasInjectedForCurrentNativeFrame = NO;
+    if (layer && layer != _activeLayer) {
+        _activeLayer = layer;
+    }
     MetalFGWarper *currentWarper = _warper;
     BOOL enabled = _isEnabled;
     os_unfair_lock_unlock(&_syncLock);
     
-    // Phase-Locked Direct Pipeline:
-    // Dispatch immediately when native frame finishes on GPU for 1:1 alternating VSYNC cadence
-    if (enabled && currentWarper && targetLayer) {
+    if (enabled && currentWarper) {
         simd_float2 touchVel = [[MetalFGTouchTracker sharedTracker] normalizedVelocityForScreenSize:CGSizeMake(texture.width, texture.height)];
-        dispatch_async(_fgQueue, ^{
-            [self executePhaseLockedGenerationWithTexture:texture layer:targetLayer touchVelocity:touchVel];
-        });
+        [currentWarper captureBaseTexture:texture withTimestamp:timestamp touchVelocity:touchVel];
     }
 }
 
@@ -308,27 +304,6 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
                        atTimestamp:(CFTimeInterval)timestamp
                        orientation:(simd_quatf)orientation {
     [self notifyNativeFramePresented:texture layer:_activeLayer atTimestamp:timestamp];
-}
-
-- (void)executePhaseLockedGenerationWithTexture:(id<MTLTexture>)texture
-                                          layer:(CAMetalLayer *)layer
-                                  touchVelocity:(simd_float2)touchVelocity {
-    os_unfair_lock_lock(&_syncLock);
-    MetalFGWarper *warper = _warper;
-    BOOL enabled = _isEnabled;
-    BOOL backgrounded = _isBackgrounded;
-    os_unfair_lock_unlock(&_syncLock);
-    
-    if (!enabled || backgrounded || !warper || !layer) return;
-    
-    BOOL rendered = [warper synthesizeAndPresentWithSourceTexture:texture
-                                                            layer:layer
-                                                    touchVelocity:touchVelocity];
-    if (rendered) {
-        os_unfair_lock_lock(&_syncLock);
-        _syntheticFrameCount++;
-        os_unfair_lock_unlock(&_syncLock);
-    }
 }
 
 - (void)onDisplayTick:(CADisplayLink *)link {
@@ -353,6 +328,57 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
             
             NSLog(@"[MetalFG] Performance: Native: %.1f FPS | Synthetic: %.1f FPS | Total: %.1f FPS",
                   nativeFps, syntheticFps, nativeFps + syntheticFps);
+        }
+        
+        if (!_isEnabled) return;
+        
+        os_unfair_lock_lock(&_syncLock);
+        CFTimeInterval lastNative = _lastNativeFrameTime;
+        BOOL alreadyInjected = _hasInjectedForCurrentNativeFrame;
+        CAMetalLayer *layer = _activeLayer;
+        MetalFGWarper *warper = _warper;
+        os_unfair_lock_unlock(&_syncLock);
+        
+        if (!layer || !warper || !warper.isReady) return;
+        
+        // STRICT 1:1 FRAME PACING:
+        // Enforce exactly 1 synthetic frame per native frame.
+        if (alreadyInjected) return;
+        
+        // Ignore HUD/sub-layers smaller than 250x150
+        CGSize drawableSize = layer.drawableSize;
+        if (drawableSize.width < 250.0 || drawableSize.height < 150.0) return;
+        
+        CFTimeInterval now = CACurrentMediaTime();
+        CFTimeInterval elapsed = now - lastNative;
+        
+        // Midpoint Pacing Guard:
+        // For a 60 FPS native game (~16.6ms per frame), the midpoint VSYNC is at ~8.33ms.
+        // If this tick occurs too close to the native frame (< 5.0ms), it belongs to the
+        // native frame's own VSYNC slot, so wait for the intermediate tick!
+        if (elapsed < 0.005) {
+            return;
+        }
+        
+        // Idle guard: if no native frame has arrived in > 150ms (paused, loading, static UI)
+        if (elapsed > 0.150) {
+            return;
+        }
+        
+        // Backpressure guard
+        if ([warper isGpuBusy]) return;
+        
+        id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
+        if (!syntheticDrawable || !syntheticDrawable.texture) return;
+        
+        CFTimeInterval targetPresentationTime = link.targetTimestamp;
+        BOOL rendered = [warper renderSyntheticFrameToDrawable:syntheticDrawable
+                                                targetTimeHint:targetPresentationTime];
+        if (rendered) {
+            os_unfair_lock_lock(&_syncLock);
+            _syntheticFrameCount++;
+            _hasInjectedForCurrentNativeFrame = YES;
+            os_unfair_lock_unlock(&_syncLock);
         }
     }
 }

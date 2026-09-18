@@ -178,8 +178,11 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);\n"
 "    float colorDist = distance(warpedColor.rgb, origColor.rgb);\n"
 "    float threshold = uniforms.disocclusionThreshold;\n"
-"    float confidence = smoothstep(threshold, threshold * 0.35f, colorDist);\n"
-"    return mix(origColor, warpedColor, confidence);\n"
+"    float4 finalColor = mix(origColor, warpedColor, confidence);\n"
+"    if (uniforms.pad[0] > 0.5f) {\n"
+"        finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);\n"
+"    }\n"
+"    return finalColor;\n"
 "}\n";
 
 // Full-screen quad consisting of 2 triangles (6 vertices)
@@ -507,7 +510,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     MetalFGWarpUniforms warpUniforms;
     warpUniforms.timeOffsetFactor = self.motionScale;
     warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
-    warpUniforms.pad[0] = 0.0f;
+    warpUniforms.pad[0] = self.debugTintEnabled ? 1.0f : 0.0f;
     warpUniforms.pad[1] = 0.0f;
     [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
     
@@ -517,8 +520,8 @@ static const MetalFGVertex kQuadVertices[6] = {
     // Tag synthetic drawable to prevent recursive presentation hooking
     objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // Present synthetic drawable with symmetric 8.33ms minimum duration (120Hz VSYNC pace)
-    [cmdBuffer presentDrawable:targetDrawable afterMinimumDuration: 1.0 / 120.0];
+    // Present synthetic drawable directly for the 120Hz VSYNC tick
+    [cmdBuffer presentDrawable:targetDrawable];
     
     _inFlightGpuFrames.fetch_add(1);
     __weak MetalFGWarper *weakSelf = self;
