@@ -14,6 +14,26 @@ inline float rgb_to_luma(float4 c) {
     return dot(c.rgb, float3(0.299f, 0.587f, 0.114f));
 }
 
+// Evaluate block error helper
+inline float eval_block_luma(texture2d<float, access::sample> currTexture,
+                             texture2d<float, access::sample> prevTexture,
+                             float2 centerUV,
+                             float dUV,
+                             float2 candidate) {
+    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+    float error = 0.0f;
+    for (int py = -1; py <= 1; py++) {
+        for (int px = -1; px <= 1; px++) {
+            float2 uvCurr = centerUV + float2(px, py) * dUV;
+            float2 uvPrev = uvCurr - candidate;
+            float lCurr = rgb_to_luma(currTexture.sample(s, uvCurr));
+            float lPrev = rgb_to_luma(prevTexture.sample(s, uvPrev));
+            error += abs(lCurr - lPrev);
+        }
+    }
+    return error / 9.0f;
+}
+
 // ============================================================================
 // Vertex Shader: Full-Screen Reprojection Quad
 // ============================================================================
@@ -37,8 +57,6 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         return;
     }
     
-    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-    
     // UV center of this macroblock
     float2 centerUV = (float2(gid) + 0.5f) / float2(uniforms.gridDimensions);
     
@@ -52,23 +70,8 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     
     const float dUV = 0.004f;
     
-    // Evaluate block error helper
-    auto evalBlock = [&](float2 candidate) -> float {
-        float error = 0.0f;
-        for (int py = -1; py <= 1; py++) {
-            for (int px = -1; px <= 1; px++) {
-                float2 uvCurr = centerUV + float2(px, py) * dUV;
-                float2 uvPrev = uvCurr - candidate;
-                float lCurr = rgb_to_luma(currTexture.sample(s, uvCurr));
-                float lPrev = rgb_to_luma(prevTexture.sample(s, uvPrev));
-                error += abs(lCurr - lPrev);
-            }
-        }
-        return error / 9.0f;
-    };
-    
     // 1. ALWAYS test stationary candidate (0, 0) first (Zero Motion / Static UI candidate)
-    float errZero = evalBlock(float2(0.0f, 0.0f));
+    float errZero = eval_block_luma(currTexture, prevTexture, centerUV, dUV, float2(0.0f, 0.0f));
     
     // In HUD zones, give candidate (0, 0) extra threshold tolerance.
     // In active gameplay center, allow subtle micro-motion (e.g. idle breathing, floating) to pass through.
@@ -92,7 +95,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
             float candLen = length(candidate);
             if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
             
-            float err = evalBlock(candidate);
+            float err = eval_block_luma(currTexture, prevTexture, centerUV, dUV, candidate);
             err += length(candidate - prior) * 0.02f;
             if (isHUDZone) err += 0.04f;
             if (err < bestError) {
@@ -112,7 +115,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
             float candLen = length(candidate);
             if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
             
-            float err = evalBlock(candidate);
+            float err = eval_block_luma(currTexture, prevTexture, centerUV, dUV, candidate);
             err += length(candidate - prior) * 0.015f;
             if (isHUDZone) err += 0.04f;
             if (err < bestError) {
@@ -132,7 +135,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
             float candLen = length(candidate);
             if (candLen > uniforms.maxDisplacement) candidate = (candidate / candLen) * uniforms.maxDisplacement;
             
-            float err = evalBlock(candidate);
+            float err = eval_block_luma(currTexture, prevTexture, centerUV, dUV, candidate);
             err += length(candidate - prior) * 0.01f;
             if (isHUDZone) err += 0.04f;
             if (err < bestError) {

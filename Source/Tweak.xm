@@ -189,15 +189,6 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 // ============================================================================
 %hook CAMetalDrawable
 
-- (void)present {
-    NSNumber *isSynthetic = objc_getAssociatedObject(self, &kMetalFGIsSyntheticKey);
-    if ((!isSynthetic || ![isSynthetic boolValue]) && [MetalFGSynchronizer sharedSynchronizer].isEnabled) {
-        [self presentAfterMinimumDuration:1.0 / 120.0];
-        return;
-    }
-    %orig;
-}
-
 - (void)presentAfterMinimumDuration:(CFTimeInterval)duration {
     NSNumber *isSynthetic = objc_getAssociatedObject(self, &kMetalFGIsSyntheticKey);
     if ((!isSynthetic || ![isSynthetic boolValue]) && [MetalFGSynchronizer sharedSynchronizer].isEnabled) {
@@ -226,10 +217,6 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
             [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
                 ProcessNativePresentation(metalDrawable);
             }];
-            if ([MetalFGSynchronizer sharedSynchronizer].isEnabled) {
-                [(id<MTLCommandBuffer>)self presentDrawable:drawable afterMinimumDuration:1.0 / 120.0];
-                return;
-            }
         }
     }
     %orig(drawable);
