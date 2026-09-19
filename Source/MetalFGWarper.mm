@@ -1,4 +1,5 @@
 #import "../Headers/MetalFGWarper.h"
+#import "../Headers/TouchTracker.h"
 #import <os/lock.h>
 #import <objc/runtime.h>
 #import <atomic>
