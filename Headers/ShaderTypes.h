@@ -43,6 +43,7 @@ enum MetalFGBufferIndices {
 enum MetalFGTextureIndices {
     MetalFGTextureIndexSource = 0,
     MetalFGTextureIndexMotionVectors = 1,
+    MetalFGTextureIndexPrev = 2,
     
     // BME Compute Kernel Texture Indices
     MetalFGBMETexturePrev = 0,

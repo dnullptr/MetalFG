@@ -232,36 +232,62 @@ kernel void metalfg_motion_median_filter(uint2 gid [[thread_position_in_grid]],
 }
 
 // ============================================================================
-// Fragment Shader: Motion-Compensated Forward Warping with Smooth Boundary Ramp
+// Fragment Shader: Motion-Compensated Forward Warping with UI Protection & Anti-Ghosting
 // ============================================================================
 fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
                                  texture2d<float, access::sample> sourceTexture [[texture(MetalFGTextureIndexSource)]],
                                  texture2d<float, access::sample> motionVectors [[texture(MetalFGTextureIndexMotionVectors)]],
+                                 texture2d<float, access::sample> prevTexture [[texture(MetalFGTextureIndexPrev)]],
                                  constant MetalFGWarpUniforms &uniforms [[buffer(MetalFGBufferIndexWarpUniforms)]]) {
     constexpr sampler linearSampler(coord::normalized,
                                     filter::linear,
                                     address::clamp_to_edge);
     
-    float4 origColor = sourceTexture.sample(linearSampler, in.texCoords);
+    float4 currColor = sourceTexture.sample(linearSampler, in.texCoords);
+    float4 prevColor = prevTexture.sample(linearSampler, in.texCoords);
     
-    // Bilinearly sample the spatially smoothed motion vector field
-    float2 mv = motionVectors.sample(linearSampler, in.texCoords).xy;
-    
-    // Static UI check: Zero motion -> bit-exact passthrough
-    float mvLenSq = dot(mv, mv);
-    if (mvLenSq < 1e-7f) {
-        return origColor;
+    // 1. Per-Pixel High-Resolution UI & Text Protection Guard:
+    // If the pixel is stationary between Frame N-1 and Frame N (or has minimal color change),
+    // it is static 2D UI (damage numbers, dialogue text, health bars, minimap, buttons).
+    // Return currColor with 100% bit-exact passthrough! Zero wobbling, zero blurring!
+    float pixelDiff = distance(currColor.rgb, prevColor.rgb);
+    if (pixelDiff < uniforms.disocclusionThreshold * 0.35f) {
+        if (uniforms.pad[0] > 0.5f) {
+            currColor.g = min(1.0f, currColor.g * 1.25f + 0.08f);
+        }
+        return currColor;
     }
     
-    float2 warpedUV = clamp(in.texCoords - mv * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));
+    // 2. Sample motion vector at destination pixel
+    float2 mv = motionVectors.sample(linearSampler, in.texCoords).xy;
+    
+    // 3. Forward-Guided Vector Sampling (Eliminates Leading-Edge Holes):
+    // If a moving silhouette (e.g. Paimon, character) is advancing into this pixel,
+    // the destination pixel in Frame N was background, but the source pixel has the true velocity.
+    float2 mvSrc = motionVectors.sample(linearSampler, in.texCoords - mv * uniforms.timeOffsetFactor).xy;
+    float2 effMV = (dot(mvSrc, mvSrc) > dot(mv, mv)) ? mvSrc : mv;
+    
+    float mvLenSq = dot(effMV, effMV);
+    if (mvLenSq < 1e-7f) {
+        if (uniforms.pad[0] > 0.5f) {
+            currColor.g = min(1.0f, currColor.g * 1.25f + 0.08f);
+        }
+        return currColor;
+    }
+    
+    // 4. Sample warped pixel along forward motion vector
+    float2 warpedUV = clamp(in.texCoords - effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));
     float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);
     
-    // Seamless transition at motion boundaries:
-    // Linearly blend from static origColor to solid warpedColor over a subtle motion threshold.
-    // NO ghosting, NO double-image, NO color-distance rejection that tears moving edges!
+    // 5. Anti-Ghosting & Disocclusion Rejection:
+    // If the warped color diverges excessively from both current and previous,
+    // it is a newly revealed background seam. Blend back towards currColor to eliminate ghosting.
+    float warpDist = distance(warpedColor.rgb, currColor.rgb);
+    float confidence = smoothstep(uniforms.disocclusionThreshold * 1.6f, uniforms.disocclusionThreshold * 0.5f, warpDist);
+    
     float mvMag = sqrt(mvLenSq);
-    float motionWeight = smoothstep(0.0005f, 0.0025f, mvMag);
-    float4 finalColor = mix(origColor, warpedColor, motionWeight);
+    float motionWeight = smoothstep(0.0004f, 0.0020f, mvMag) * confidence;
+    float4 finalColor = mix(currColor, warpedColor, motionWeight);
     
     if (uniforms.pad[0] > 0.5f) {
         finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);

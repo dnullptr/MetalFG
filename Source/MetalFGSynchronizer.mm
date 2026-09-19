@@ -352,6 +352,14 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         CFTimeInterval now = CACurrentMediaTime();
         CFTimeInterval elapsed = now - lastNative;
         
+        // Midpoint Pacing Window:
+        // For a 60 FPS native game (~16.6ms per frame), the midpoint VSYNC is at ~8.33ms.
+        // If this tick occurs too soon (< 3.5ms) after native frame completion, it belongs to the
+        // native frame's own VSYNC refresh cycle. Wait for the intermediate 8.33ms tick!
+        if (elapsed < 0.0035) {
+            return;
+        }
+        
         // Idle guard: if no native frame has arrived in > 150ms (paused, loading, static UI)
         if (elapsed > 0.150) {
             return;

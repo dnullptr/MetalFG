@@ -187,19 +187,31 @@ static NSString * const kEmbeddedMetalSource = @""
 "fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],\n"
 "                                 texture2d<float, access::sample> sourceTexture [[texture(0)]],\n"
 "                                 texture2d<float, access::sample> motionVectors [[texture(1)]],\n"
+"                                 texture2d<float, access::sample> prevTexture [[texture(2)]],\n"
 "                                 constant MetalFGWarpUniforms &uniforms [[buffer(1)]]) {\n"
 "    constexpr sampler linearSampler(coord::normalized, filter::linear, address::clamp_to_edge);\n"
-"    float4 origColor = sourceTexture.sample(linearSampler, in.texCoords);\n"
-"    float2 mv = motionVectors.sample(linearSampler, in.texCoords).xy;\n"
-"    float mvLenSq = dot(mv, mv);\n"
-"    if (mvLenSq < 1e-7f) {\n"
-"        return origColor;\n"
+"    float4 currColor = sourceTexture.sample(linearSampler, in.texCoords);\n"
+"    float4 prevColor = prevTexture.sample(linearSampler, in.texCoords);\n"
+"    float pixelDiff = distance(currColor.rgb, prevColor.rgb);\n"
+"    if (pixelDiff < uniforms.disocclusionThreshold * 0.35f) {\n"
+"        if (uniforms.pad[0] > 0.5f) { currColor.g = min(1.0f, currColor.g * 1.25f + 0.08f); }\n"
+"        return currColor;\n"
 "    }\n"
-"    float2 warpedUV = clamp(in.texCoords - mv * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));\n"
+"    float2 mv = motionVectors.sample(linearSampler, in.texCoords).xy;\n"
+"    float2 mvSrc = motionVectors.sample(linearSampler, in.texCoords - mv * uniforms.timeOffsetFactor).xy;\n"
+"    float2 effMV = (dot(mvSrc, mvSrc) > dot(mv, mv)) ? mvSrc : mv;\n"
+"    float mvLenSq = dot(effMV, effMV);\n"
+"    if (mvLenSq < 1e-7f) {\n"
+"        if (uniforms.pad[0] > 0.5f) { currColor.g = min(1.0f, currColor.g * 1.25f + 0.08f); }\n"
+"        return currColor;\n"
+"    }\n"
+"    float2 warpedUV = clamp(in.texCoords - effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));\n"
 "    float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);\n"
+"    float warpDist = distance(warpedColor.rgb, currColor.rgb);\n"
+"    float confidence = smoothstep(uniforms.disocclusionThreshold * 1.6f, uniforms.disocclusionThreshold * 0.5f, warpDist);\n"
 "    float mvMag = sqrt(mvLenSq);\n"
-"    float motionWeight = smoothstep(0.0005f, 0.0025f, mvMag);\n"
-"    float4 finalColor = mix(origColor, warpedColor, motionWeight);\n"
+"    float motionWeight = smoothstep(0.0004f, 0.0020f, mvMag) * confidence;\n"
+"    float4 finalColor = mix(currColor, warpedColor, motionWeight);\n"
 "    if (uniforms.pad[0] > 0.5f) {\n"
 "        finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);\n"
 "    }\n"
@@ -507,6 +519,8 @@ static const MetalFGVertex kQuadVertices[6] = {
         return NO;
     }
     id<MTLTexture> sourceTex = _cachedTextures[_activeReadIndex];
+    NSInteger prevIdx = (_activeReadIndex == 0 ? 1 : 0);
+    id<MTLTexture> prevTex = _cachedTextures[prevIdx] ? _cachedTextures[prevIdx] : sourceTex;
     id<MTLTexture> mvTex = _smoothedMotionVectorTexture ? _smoothedMotionVectorTexture : _motionVectorTexture;
     os_unfair_lock_unlock(&_textureLock);
     
@@ -532,6 +546,9 @@ static const MetalFGVertex kQuadVertices[6] = {
     
     if (mvTex) {
         [enc setFragmentTexture:mvTex atIndex:MetalFGTextureIndexMotionVectors];
+    }
+    if (prevTex) {
+        [enc setFragmentTexture:prevTex atIndex:MetalFGTextureIndexPrev];
     }
     
     MetalFGWarpUniforms warpUniforms;
