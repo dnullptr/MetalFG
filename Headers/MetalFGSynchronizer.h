@@ -15,10 +15,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL debugTint;         // Visual tint for synthetic frames
 
 // Dynamic Tuning Parameters
-@property (nonatomic, assign) float motionScale;             // Default: 0.42 (Range: 0.10 - 0.80)
-@property (nonatomic, assign) float disocclusionThreshold;   // Default: 0.22 (Range: 0.10 - 0.40)
+@property (nonatomic, assign) float motionScale;             // Default: 0.45 (Range: 0.10 - 0.70)
+@property (nonatomic, assign) float disocclusionThreshold;   // Default: 0.20 (Range: 0.08 - 0.35)
 @property (nonatomic, assign) float uiSensitivity;           // Default: 0.035 (Range: 0.01 - 0.08)
-@property (nonatomic, assign) NSInteger currentPreset;       // 0: Clear, 1: Balanced, 2: Fluid, 3: Custom
+@property (nonatomic, assign) float motionDeadzone;          // Default: 0.0004 (Range: 0.0001 - 0.0020)
+@property (nonatomic, assign) NSInteger currentPreset;       // 0: Crisp, 1: Balanced, 2: Ultra Smooth, 3: Custom
 
 - (void)applyPreset:(NSInteger)presetIndex;
 - (void)savePreferences;

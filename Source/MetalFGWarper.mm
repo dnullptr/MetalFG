@@ -31,7 +31,8 @@ static NSString * const kEmbeddedMetalSource = @""
 "struct MetalFGWarpUniforms {\n"
 "    float timeOffsetFactor;\n"
 "    float disocclusionThreshold;\n"
-"    float pad[2];\n"
+"    float motionDeadzone;\n"
+"    float debugTint;\n"
 "};\n"
 "\n"
 "struct RasterizerData {\n"
@@ -195,7 +196,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float4 prevColor = prevTexture.sample(linearSampler, in.texCoords);\n"
 "    float pixelDiff = distance(currColor.rgb, prevColor.rgb);\n"
 "    if (pixelDiff < uniforms.disocclusionThreshold * 0.35f) {\n"
-"        if (uniforms.pad[0] > 0.5f) { currColor.g = min(1.0f, currColor.g * 1.25f + 0.08f); }\n"
+"        if (uniforms.debugTint > 0.5f) { currColor.r = min(1.0f, currColor.r * 1.25f + 0.10f); }\n"
 "        return currColor;\n"
 "    }\n"
 "    float2 mv = motionVectors.sample(linearSampler, in.texCoords).xy;\n"
@@ -203,7 +204,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float2 effMV = (dot(mvSrc, mvSrc) > dot(mv, mv)) ? mvSrc : mv;\n"
 "    float mvLenSq = dot(effMV, effMV);\n"
 "    if (mvLenSq < 1e-7f) {\n"
-"        if (uniforms.pad[0] > 0.5f) { currColor.g = min(1.0f, currColor.g * 1.25f + 0.08f); }\n"
+"        if (uniforms.debugTint > 0.5f) { currColor.b = min(1.0f, currColor.b * 1.25f + 0.10f); }\n"
 "        return currColor;\n"
 "    }\n"
 "    float2 warpedUV = clamp(in.texCoords - effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));\n"
@@ -212,12 +213,12 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float4 samplePrev = prevTexture.sample(linearSampler, uvPrev);\n"
 "    float sampleDist = distance(sampleCurr.rgb, samplePrev.rgb);\n"
 "    float confidence = smoothstep(uniforms.disocclusionThreshold * 1.6f, uniforms.disocclusionThreshold * 0.5f, sampleDist);\n"
-"    float4 interpolated = mix(sampleCurr, samplePrev, 0.5f);\n"
+"    float4 interpolated = mix(sampleCurr, samplePrev, 0.5f * confidence);\n"
 "    float mvMag = sqrt(mvLenSq);\n"
-"    float motionWeight = smoothstep(0.0004f, 0.0020f, mvMag) * confidence;\n"
+"    float motionWeight = smoothstep(uniforms.motionDeadzone, uniforms.motionDeadzone * 3.0f, mvMag);\n"
 "    float4 finalColor = mix(currColor, interpolated, motionWeight);\n"
-"    if (uniforms.pad[0] > 0.5f) {\n"
-"        finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);\n"
+"    if (uniforms.debugTint > 0.5f) {\n"
+"        finalColor.g = min(1.0f, finalColor.g * 1.35f + 0.15f);\n"
 "    }\n"
 "    return finalColor;\n"
 "}\n";
@@ -274,9 +275,10 @@ static const MetalFGVertex kQuadVertices[6] = {
         _hasValidBaseFrame = NO;
         _inFlightGpuFrames = 0;
         _debugTintEnabled = NO;
-        _motionScale = 0.50f;
-        _disocclusionThreshold = 0.22f;
+        _motionScale = 0.45f;
+        _disocclusionThreshold = 0.20f;
         _uiSensitivity = 0.035f;
+        _motionDeadzone = 0.0004f;
         
         _commandQueue = [_device newCommandQueue];
         _commandQueue.label = @"com.metalfg.warperqueue";
@@ -558,8 +560,8 @@ static const MetalFGVertex kQuadVertices[6] = {
     MetalFGWarpUniforms warpUniforms;
     warpUniforms.timeOffsetFactor = self.motionScale;
     warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
-    warpUniforms.pad[0] = self.debugTintEnabled ? 1.0f : 0.0f;
-    warpUniforms.pad[1] = 0.0f;
+    warpUniforms.motionDeadzone = self.motionDeadzone;
+    warpUniforms.debugTint = self.debugTintEnabled ? 1.0f : 0.0f;
     [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
     
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
@@ -720,8 +722,8 @@ static const MetalFGVertex kQuadVertices[6] = {
     MetalFGWarpUniforms warpUniforms;
     warpUniforms.timeOffsetFactor = self.motionScale;
     warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
-    warpUniforms.pad[0] = 0.0f;
-    warpUniforms.pad[1] = 0.0f;
+    warpUniforms.motionDeadzone = self.motionDeadzone;
+    warpUniforms.debugTint = self.debugTintEnabled ? 1.0f : 0.0f;
     [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
     
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
@@ -844,8 +846,8 @@ static const MetalFGVertex kQuadVertices[6] = {
         MetalFGWarpUniforms warpUniforms;
         warpUniforms.timeOffsetFactor = self.motionScale;
         warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
-        warpUniforms.pad[0] = self.debugTintEnabled ? 1.0f : 0.0f;
-        warpUniforms.pad[1] = 0.0f;
+        warpUniforms.motionDeadzone = self.motionDeadzone;
+        warpUniforms.debugTint = self.debugTintEnabled ? 1.0f : 0.0f;
         [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
         
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];

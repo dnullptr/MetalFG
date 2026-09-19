@@ -27,9 +27,10 @@ typedef struct {
 
 // Uniforms for Synthetic Frame Warping fragment shader (16 bytes, 16-byte aligned)
 typedef struct {
-    float timeOffsetFactor;      // Configurable motion scale (e.g. 0.20 to 0.80, default 0.42)
-    float disocclusionThreshold; // Disocclusion color divergence threshold (e.g. 0.10 to 0.35, default 0.22)
-    float pad[2];                // Explicit padding for 16-byte alignment
+    float timeOffsetFactor;      // Configurable motion scale (0.10 to 0.70, default 0.45)
+    float disocclusionThreshold; // Disocclusion color divergence threshold (0.08 to 0.35, default 0.20)
+    float motionDeadzone;        // Minimum motion magnitude cutoff (0.0001 to 0.0020, default 0.0004)
+    float debugTint;             // 1.0 = Visual debug tint active, 0.0 = Normal
 } MetalFGWarpUniforms;
 
 // Buffer indices shared between host code and MSL

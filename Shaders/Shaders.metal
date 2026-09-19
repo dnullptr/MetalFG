@@ -252,8 +252,8 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     // Return currColor with 100% bit-exact passthrough! Zero wobbling, zero blurring!
     float pixelDiff = distance(currColor.rgb, prevColor.rgb);
     if (pixelDiff < uniforms.disocclusionThreshold * 0.35f) {
-        if (uniforms.pad[0] > 0.5f) {
-            currColor.g = min(1.0f, currColor.g * 1.25f + 0.08f);
+        if (uniforms.debugTint > 0.5f) {
+            currColor.r = min(1.0f, currColor.r * 1.25f + 0.10f); // UI debug tint: slight magenta/red indicator
         }
         return currColor;
     }
@@ -269,34 +269,35 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     
     float mvLenSq = dot(effMV, effMV);
     if (mvLenSq < 1e-7f) {
-        if (uniforms.pad[0] > 0.5f) {
-            currColor.g = min(1.0f, currColor.g * 1.25f + 0.08f);
+        if (uniforms.debugTint > 0.5f) {
+            currColor.b = min(1.0f, currColor.b * 1.25f + 0.10f);
         }
         return currColor;
     }
     
     // 4. True Bidirectional Interpolation:
-    // Sample Frame N warped backward to t = 0.5:
+    // Sample Frame N warped backward to midpoint:
     float2 uvCurr = clamp(in.texCoords - effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));
     float4 sampleCurr = sourceTexture.sample(linearSampler, uvCurr);
     
-    // Sample Frame N-1 warped forward to t = 0.5:
+    // Sample Frame N-1 warped forward to midpoint:
     float2 uvPrev = clamp(in.texCoords + effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));
     float4 samplePrev = prevTexture.sample(linearSampler, uvPrev);
     
-    // 5. Bidirectional Blending & Disocclusion Confidence:
-    // Ground-truth midpoint is a 50/50 blend between both frames.
-    // When disocclusion occurs, confidence smoothly clamps back to currColor to prevent ghosting.
+    // 5. Bidirectional Blending & Occlusion Fallback:
+    // When both frames match, a 50/50 blend gives the ground-truth midpoint.
+    // In occluded/disoccluded zones where samplePrev diverged, smoothly fall back to sampleCurr
+    // (which is already warped along the trajectory!) to eliminate ghosting while preserving fluid motion.
     float sampleDist = distance(sampleCurr.rgb, samplePrev.rgb);
     float confidence = smoothstep(uniforms.disocclusionThreshold * 1.6f, uniforms.disocclusionThreshold * 0.5f, sampleDist);
-    float4 interpolated = mix(sampleCurr, samplePrev, 0.5f);
+    float4 interpolated = mix(sampleCurr, samplePrev, 0.5f * confidence);
     
     float mvMag = sqrt(mvLenSq);
-    float motionWeight = smoothstep(0.0004f, 0.0020f, mvMag) * confidence;
+    float motionWeight = smoothstep(uniforms.motionDeadzone, uniforms.motionDeadzone * 3.0f, mvMag);
     float4 finalColor = mix(currColor, interpolated, motionWeight);
     
-    if (uniforms.pad[0] > 0.5f) {
-        finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);
+    if (uniforms.debugTint > 0.5f) {
+        finalColor.g = min(1.0f, finalColor.g * 1.35f + 0.15f); // Synthetic frame glow: emerald green
     }
     return finalColor;
 }

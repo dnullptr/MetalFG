@@ -58,29 +58,41 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         if (dict[@"currentPreset"] != nil) {
             _currentPreset = [dict[@"currentPreset"] integerValue];
         } else {
-            _currentPreset = 1; // Balanced
+            _currentPreset = 0; // Default to Crisp (user's preferred clean baseline)
         }
         if (dict[@"motionScale"] != nil) {
             _motionScale = [dict[@"motionScale"] floatValue];
         } else {
-            _motionScale = 0.50f;
+            _motionScale = 0.38f;
         }
         if (dict[@"disocclusionThreshold"] != nil) {
             _disocclusionThreshold = [dict[@"disocclusionThreshold"] floatValue];
         } else {
-            _disocclusionThreshold = 0.22f;
+            _disocclusionThreshold = 0.15f;
         }
         if (dict[@"uiSensitivity"] != nil) {
             _uiSensitivity = [dict[@"uiSensitivity"] floatValue];
         } else {
-            _uiSensitivity = 0.035f;
+            _uiSensitivity = 0.040f;
+        }
+        if (dict[@"motionDeadzone"] != nil) {
+            _motionDeadzone = [dict[@"motionDeadzone"] floatValue];
+        } else {
+            _motionDeadzone = 0.0006f;
+        }
+        if (dict[@"debugTint"] != nil) {
+            _debugTint = [dict[@"debugTint"] boolValue];
+        } else {
+            _debugTint = NO;
         }
     } else {
         _isEnabled = YES;
-        _currentPreset = 1;
-        _motionScale = 0.50f;
-        _disocclusionThreshold = 0.22f;
-        _uiSensitivity = 0.035f;
+        _currentPreset = 0; // Crisp
+        _motionScale = 0.38f;
+        _disocclusionThreshold = 0.15f;
+        _uiSensitivity = 0.040f;
+        _motionDeadzone = 0.0006f;
+        _debugTint = NO;
     }
 }
 
@@ -95,26 +107,31 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     dict[@"motionScale"] = @(_motionScale);
     dict[@"disocclusionThreshold"] = @(_disocclusionThreshold);
     dict[@"uiSensitivity"] = @(_uiSensitivity);
+    dict[@"motionDeadzone"] = @(_motionDeadzone);
+    dict[@"debugTint"] = @(_debugTint);
     [dict writeToFile:path atomically:YES];
 }
 
 - (void)applyPreset:(NSInteger)presetIndex {
     _currentPreset = presetIndex;
     switch (presetIndex) {
-        case 0: // Clear (anti-ghosting focus)
-            self.motionScale = 0.35f;
-            self.disocclusionThreshold = 0.16f;
+        case 0: // Crisp (Ultra-clean silhouette edges, zero ghosting, tight motion)
+            self.motionScale = 0.38f;
+            self.disocclusionThreshold = 0.15f;
             self.uiSensitivity = 0.040f;
+            self.motionDeadzone = 0.0006f;
             break;
-        case 1: // Balanced (default sweet spot)
-            self.motionScale = 0.50f;
-            self.disocclusionThreshold = 0.22f;
+        case 1: // Balanced (Fluid 120Hz motion with tight occlusion fallback)
+            self.motionScale = 0.45f;
+            self.disocclusionThreshold = 0.20f;
             self.uiSensitivity = 0.035f;
+            self.motionDeadzone = 0.0004f;
             break;
-        case 2: // Fluid (maximum motion)
+        case 2: // Ultra Smooth (Full LSFG midpoint 50% interpolation, maximum fluidity)
             self.motionScale = 0.50f;
-            self.disocclusionThreshold = 0.28f;
-            self.uiSensitivity = 0.025f;
+            self.disocclusionThreshold = 0.24f;
+            self.uiSensitivity = 0.028f;
+            self.motionDeadzone = 0.0002f;
             break;
         default:
             break;
@@ -147,6 +164,25 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         _warper.uiSensitivity = uiSensitivity;
     }
     os_unfair_lock_unlock(&_syncLock);
+}
+
+- (void)setMotionDeadzone:(float)motionDeadzone {
+    _motionDeadzone = motionDeadzone;
+    os_unfair_lock_lock(&_syncLock);
+    if (_warper) {
+        _warper.motionDeadzone = motionDeadzone;
+    }
+    os_unfair_lock_unlock(&_syncLock);
+}
+
+- (void)setDebugTint:(BOOL)debugTint {
+    _debugTint = debugTint;
+    os_unfair_lock_lock(&_syncLock);
+    if (_warper) {
+        _warper.debugTintEnabled = debugTint;
+    }
+    os_unfair_lock_unlock(&_syncLock);
+    [self savePreferences];
 }
 
 - (void)setIsEnabled:(BOOL)isEnabled {
@@ -227,6 +263,7 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         _warper.motionScale = _motionScale;
         _warper.disocclusionThreshold = _disocclusionThreshold;
         _warper.uiSensitivity = _uiSensitivity;
+        _warper.motionDeadzone = _motionDeadzone;
     }
     
     if (!_syncThread || !_syncThread.isExecuting) {

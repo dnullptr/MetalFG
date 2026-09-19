@@ -103,6 +103,9 @@
     UILabel *_ghostValLabel;
     UISlider *_uiSlider;
     UILabel *_uiValLabel;
+    UISlider *_deadzoneSlider;
+    UILabel *_deadzoneValLabel;
+    UISwitch *_debugSwitch;
 }
 
 @property (nonatomic, copy) void (^onClose)(void);
@@ -137,36 +140,36 @@
         [self addGestureRecognizer:pan];
         
         // Header: Title & Version
-        UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 170, 20)];
+        UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, 210, 20)];
         titleLabel.text = @"⚡ MetalFG Tuning";
         titleLabel.textColor = [UIColor whiteColor];
         titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightBold];
         [content addSubview:titleLabel];
         
-        UILabel *verLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 32, 170, 14)];
-        verLabel.text = @"v1.1.0 • Live Shader Control";
+        UILabel *verLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 30, 210, 14)];
+        verLabel.text = @"v2.0.0 • True Interpolation Engine";
         verLabel.textColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:0.9];
         verLabel.font = [UIFont monospacedDigitSystemFontOfSize:9.5 weight:UIFontWeightMedium];
         [content addSubview:verLabel];
         
         // Close Button (✕)
         UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        closeBtn.frame = CGRectMake(self.bounds.size.width - 42, 10, 28, 28);
+        closeBtn.frame = CGRectMake(self.bounds.size.width - 38, 8, 26, 26);
         [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
-        closeBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+        closeBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
         [closeBtn setTitleColor:[UIColor colorWithWhite:0.85 alpha:1.0] forState:UIControlStateNormal];
         closeBtn.backgroundColor = [UIColor colorWithWhite:0.22 alpha:0.7];
-        closeBtn.layer.cornerRadius = 14.0;
+        closeBtn.layer.cornerRadius = 13.0;
         [closeBtn addTarget:self action:@selector(handleClose) forControlEvents:UIControlEventTouchUpInside];
         [content addSubview:closeBtn];
         
-        // Preset Segmented Control
-        _presetSegment = [[UISegmentedControl alloc] initWithItems:@[@"Clear", @"Balanced", @"Fluid"]];
-        _presetSegment.frame = CGRectMake(16, 52, self.bounds.size.width - 32, 28);
+        // Preset Segmented Control: [Crisp] [Balanced] [Ultra Smooth]
+        _presetSegment = [[UISegmentedControl alloc] initWithItems:@[@"Crisp", @"Balanced", @"Ultra Smooth"]];
+        _presetSegment.frame = CGRectMake(16, 48, self.bounds.size.width - 32, 28);
         if (@available(iOS 13.0, *)) {
             _presetSegment.selectedSegmentTintColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:0.85];
-            [_presetSegment setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor], NSFontAttributeName: [UIFont systemFontOfSize:11.5 weight:UIFontWeightBold]} forState:UIControlStateSelected];
-            [_presetSegment setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor whiteColor], NSFontAttributeName: [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium]} forState:UIControlStateNormal];
+            [_presetSegment setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor blackColor], NSFontAttributeName: [UIFont systemFontOfSize:11.0 weight:UIFontWeightBold]} forState:UIControlStateSelected];
+            [_presetSegment setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor whiteColor], NSFontAttributeName: [UIFont systemFontOfSize:11.0 weight:UIFontWeightMedium]} forState:UIControlStateNormal];
         }
         [_presetSegment addTarget:self action:@selector(handlePresetChange:) forControlEvents:UIControlEventValueChanged];
         [content addSubview:_presetSegment];
@@ -174,93 +177,138 @@
         CGFloat w = self.bounds.size.width - 32;
         
         // --- Slider 1: Motion Warp Scale ---
-        UILabel *mTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 88, 180, 16)];
+        UILabel *mTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 82, 180, 15)];
         mTitle.text = @"Motion Warp Scale";
         mTitle.textColor = [UIColor whiteColor];
-        mTitle.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
+        mTitle.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
         [content addSubview:mTitle];
         
-        _motionValLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.bounds.size.width - 96, 88, 80, 16)];
+        _motionValLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.bounds.size.width - 96, 82, 80, 15)];
         _motionValLabel.textColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:1.0];
-        _motionValLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightBold];
+        _motionValLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightBold];
         _motionValLabel.textAlignment = NSTextAlignmentRight;
         [content addSubview:_motionValLabel];
         
-        UILabel *mSub = [[UILabel alloc] initWithFrame:CGRectMake(16, 104, w, 12)];
-        mSub.text = @"Camera whip factor (lower = zero edge ghosting)";
+        UILabel *mSub = [[UILabel alloc] initWithFrame:CGRectMake(16, 97, w, 11)];
+        mSub.text = @"Interpolation step (38% = Crisp, 50% = True Midpoint)";
         mSub.textColor = [UIColor colorWithWhite:0.6 alpha:1.0];
-        mSub.font = [UIFont systemFontOfSize:9.5 weight:UIFontWeightRegular];
+        mSub.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightRegular];
         [content addSubview:mSub];
         
-        _motionSlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 118, w, 24)];
+        _motionSlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 110, w, 22)];
         _motionSlider.minimumValue = 0.10f;
-        _motionSlider.maximumValue = 0.80f;
+        _motionSlider.maximumValue = 0.70f;
         _motionSlider.minimumTrackTintColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:1.0];
         [_motionSlider addTarget:self action:@selector(handleMotionSliderChange:) forControlEvents:UIControlEventValueChanged];
         [content addSubview:_motionSlider];
         
         // --- Slider 2: Ghost Rejection (Disocclusion Cutoff) ---
-        UILabel *gTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 150, 180, 16)];
+        UILabel *gTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 136, 180, 15)];
         gTitle.text = @"Ghost Rejection";
         gTitle.textColor = [UIColor whiteColor];
-        gTitle.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
+        gTitle.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
         [content addSubview:gTitle];
         
-        _ghostValLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.bounds.size.width - 96, 150, 80, 16)];
+        _ghostValLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.bounds.size.width - 96, 136, 80, 15)];
         _ghostValLabel.textColor = [UIColor colorWithRed:0.25 green:0.80 blue:1.0 alpha:1.0];
-        _ghostValLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightBold];
+        _ghostValLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightBold];
         _ghostValLabel.textAlignment = NSTextAlignmentRight;
         [content addSubview:_ghostValLabel];
         
-        UILabel *gSub = [[UILabel alloc] initWithFrame:CGRectMake(16, 166, w, 12)];
-        gSub.text = @"Disocclusion cutoff (prevents 50/50 double image)";
+        UILabel *gSub = [[UILabel alloc] initWithFrame:CGRectMake(16, 151, w, 11)];
+        gSub.text = @"Disocclusion cutoff (low = crisp edges, high = aggressive blend)";
         gSub.textColor = [UIColor colorWithWhite:0.6 alpha:1.0];
-        gSub.font = [UIFont systemFontOfSize:9.5 weight:UIFontWeightRegular];
+        gSub.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightRegular];
         [content addSubview:gSub];
         
-        _ghostSlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 180, w, 24)];
-        _ghostSlider.minimumValue = 0.10f;
-        _ghostSlider.maximumValue = 0.40f;
+        _ghostSlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 164, w, 22)];
+        _ghostSlider.minimumValue = 0.08f;
+        _ghostSlider.maximumValue = 0.35f;
         _ghostSlider.minimumTrackTintColor = [UIColor colorWithRed:0.25 green:0.80 blue:1.0 alpha:1.0];
         [_ghostSlider addTarget:self action:@selector(handleGhostSliderChange:) forControlEvents:UIControlEventValueChanged];
         [content addSubview:_ghostSlider];
         
         // --- Slider 3: UI / HUD Protection ---
-        UILabel *uTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 212, 180, 16)];
+        UILabel *uTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 190, 180, 15)];
         uTitle.text = @"UI / HUD Protection";
         uTitle.textColor = [UIColor whiteColor];
-        uTitle.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
+        uTitle.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
         [content addSubview:uTitle];
         
-        _uiValLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.bounds.size.width - 96, 212, 80, 16)];
+        _uiValLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.bounds.size.width - 96, 190, 80, 15)];
         _uiValLabel.textColor = [UIColor colorWithRed:1.0 green:0.75 blue:0.2 alpha:1.0];
-        _uiValLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightBold];
+        _uiValLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightBold];
         _uiValLabel.textAlignment = NSTextAlignmentRight;
         [content addSubview:_uiValLabel];
         
-        UILabel *uSub = [[UILabel alloc] initWithFrame:CGRectMake(16, 228, w, 12)];
-        uSub.text = @"Preserves static UI, skill buttons & minimap";
+        UILabel *uSub = [[UILabel alloc] initWithFrame:CGRectMake(16, 205, w, 11)];
+        uSub.text = @"Preserves static dialogue text, health bars & minimap";
         uSub.textColor = [UIColor colorWithWhite:0.6 alpha:1.0];
-        uSub.font = [UIFont systemFontOfSize:9.5 weight:UIFontWeightRegular];
+        uSub.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightRegular];
         [content addSubview:uSub];
         
-        _uiSlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 242, w, 24)];
+        _uiSlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 218, w, 22)];
         _uiSlider.minimumValue = 0.010f;
         _uiSlider.maximumValue = 0.080f;
         _uiSlider.minimumTrackTintColor = [UIColor colorWithRed:1.0 green:0.75 blue:0.2 alpha:1.0];
         [_uiSlider addTarget:self action:@selector(handleUiSliderChange:) forControlEvents:UIControlEventValueChanged];
         [content addSubview:_uiSlider];
         
+        // --- Slider 4: Motion Sensitivity (Deadzone Cutoff) ---
+        UILabel *dTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 244, 180, 15)];
+        dTitle.text = @"Motion Sensitivity";
+        dTitle.textColor = [UIColor whiteColor];
+        dTitle.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+        [content addSubview:dTitle];
+        
+        _deadzoneValLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.bounds.size.width - 96, 244, 80, 15)];
+        _deadzoneValLabel.textColor = [UIColor colorWithRed:0.85 green:0.45 blue:1.0 alpha:1.0];
+        _deadzoneValLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightBold];
+        _deadzoneValLabel.textAlignment = NSTextAlignmentRight;
+        [content addSubview:_deadzoneValLabel];
+        
+        UILabel *dSub = [[UILabel alloc] initWithFrame:CGRectMake(16, 259, w, 11)];
+        dSub.text = @"Minimum motion threshold (lower = smoother micro-movements)";
+        dSub.textColor = [UIColor colorWithWhite:0.6 alpha:1.0];
+        dSub.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightRegular];
+        [content addSubview:dSub];
+        
+        _deadzoneSlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 272, w, 22)];
+        _deadzoneSlider.minimumValue = 0.0001f;
+        _deadzoneSlider.maximumValue = 0.0015f;
+        _deadzoneSlider.minimumTrackTintColor = [UIColor colorWithRed:0.85 green:0.45 blue:1.0 alpha:1.0];
+        [_deadzoneSlider addTarget:self action:@selector(handleDeadzoneSliderChange:) forControlEvents:UIControlEventValueChanged];
+        [content addSubview:_deadzoneSlider];
+        
+        // --- Row 5: Debug Visualizer Switch ---
+        UILabel *dbgTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 304, 210, 16)];
+        dbgTitle.text = @"🟢 Debug Visualizer (Emerald Glow)";
+        dbgTitle.textColor = [UIColor whiteColor];
+        dbgTitle.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+        [content addSubview:dbgTitle];
+        
+        UILabel *dbgSub = [[UILabel alloc] initWithFrame:CGRectMake(16, 320, 210, 11)];
+        dbgSub.text = @"Tints synthetic frames to visually verify 120Hz flow";
+        dbgSub.textColor = [UIColor colorWithWhite:0.6 alpha:1.0];
+        dbgSub.font = [UIFont systemFontOfSize:9.0 weight:UIFontWeightRegular];
+        [content addSubview:dbgSub];
+        
+        _debugSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(self.bounds.size.width - 66, 302, 50, 31)];
+        _debugSwitch.onTintColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:1.0];
+        _debugSwitch.transform = CGAffineTransformMakeScale(0.80, 0.80);
+        [_debugSwitch addTarget:self action:@selector(handleDebugSwitchChange:) forControlEvents:UIControlEventValueChanged];
+        [content addSubview:_debugSwitch];
+        
         // --- Done Button ---
         UIButton *doneBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        doneBtn.frame = CGRectMake(16, 280, w, 36);
+        doneBtn.frame = CGRectMake(16, 342, w, 34);
         doneBtn.backgroundColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:0.22];
         doneBtn.layer.cornerRadius = 10.0;
         doneBtn.layer.borderWidth = 1.0;
         doneBtn.layer.borderColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:0.65].CGColor;
         [doneBtn setTitle:@"✓ Apply & Close" forState:UIControlStateNormal];
         [doneBtn setTitleColor:[UIColor colorWithRed:0.25 green:0.95 blue:0.55 alpha:1.0] forState:UIControlStateNormal];
-        doneBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+        doneBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightBold];
         [doneBtn addTarget:self action:@selector(handleClose) forControlEvents:UIControlEventTouchUpInside];
         [content addSubview:doneBtn];
         
@@ -301,6 +349,11 @@
     
     _uiSlider.value = sync.uiSensitivity;
     _uiValLabel.text = [NSString stringWithFormat:@"%.3f", sync.uiSensitivity];
+    
+    _deadzoneSlider.value = sync.motionDeadzone;
+    _deadzoneValLabel.text = [NSString stringWithFormat:@"%.4f", sync.motionDeadzone];
+    
+    _debugSwitch.on = sync.debugTint;
 }
 
 - (void)handlePresetChange:(UISegmentedControl *)sender {
@@ -337,6 +390,20 @@
     _presetSegment.selectedSegmentIndex = UISegmentedControlNoSegment;
     _uiValLabel.text = [NSString stringWithFormat:@"%.3f", sender.value];
     [sync savePreferences];
+}
+
+- (void)handleDeadzoneSliderChange:(UISlider *)sender {
+    MetalFGSynchronizer *sync = [MetalFGSynchronizer sharedSynchronizer];
+    sync.motionDeadzone = sender.value;
+    sync.currentPreset = 3; // Custom
+    _presetSegment.selectedSegmentIndex = UISegmentedControlNoSegment;
+    _deadzoneValLabel.text = [NSString stringWithFormat:@"%.4f", sender.value];
+    [sync savePreferences];
+}
+
+- (void)handleDebugSwitchChange:(UISwitch *)sender {
+    MetalFGSynchronizer *sync = [MetalFGSynchronizer sharedSynchronizer];
+    sync.debugTint = sender.isOn;
 }
 
 - (void)handleClose {
@@ -522,7 +589,7 @@
     }
     
     if (!_tuningView) {
-        _tuningView = [[MetalFGTuningView alloc] initWithFrame:CGRectMake(0, 0, 310, 330)];
+        _tuningView = [[MetalFGTuningView alloc] initWithFrame:CGRectMake(0, 0, 320, 390)];
         __weak MetalFGOverlay *weakSelf = self;
         _tuningView.onClose = ^{
             [weakSelf toggleTuningPanel];
@@ -537,13 +604,13 @@
     // Position tuning panel intelligently relative to the pill badge
     CGFloat px = self.frame.origin.x;
     CGFloat py = CGRectGetMaxY(self.frame) + 10.0;
-    if (py + 330.0 > rootView.bounds.size.height) {
-        py = fmaxf(20.0, self.frame.origin.y - 330.0 - 10.0);
+    if (py + 390.0 > rootView.bounds.size.height) {
+        py = fmaxf(20.0, self.frame.origin.y - 390.0 - 10.0);
     }
-    if (px + 310.0 > rootView.bounds.size.width) {
-        px = fmaxf(10.0, rootView.bounds.size.width - 320.0);
+    if (px + 320.0 > rootView.bounds.size.width) {
+        px = fmaxf(10.0, rootView.bounds.size.width - 330.0);
     }
-    _tuningView.frame = CGRectMake(px, py, 310, 330);
+    _tuningView.frame = CGRectMake(px, py, 320, 390);
     _tuningView.alpha = 0.0;
     _tuningView.transform = CGAffineTransformMakeScale(0.88, 0.88);
     
