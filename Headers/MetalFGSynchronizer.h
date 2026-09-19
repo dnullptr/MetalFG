@@ -34,7 +34,10 @@ NS_ASSUME_NONNULL_BEGIN
                        pixelFormat:(MTLPixelFormat)pixelFormat;
 - (void)stopSynchronizer;
 
-// Called by hooks whenever the game presents a native frame
+// Called by hooks whenever the game completes rendering a native frame (v2.0.0)
+- (void)notifyNativeFrameRendered:(id<CAMetalDrawable>)drawable;
+
+// Legacy presentation notification
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture
                              layer:(nullable CAMetalLayer *)layer
                        atTimestamp:(CFTimeInterval)timestamp;

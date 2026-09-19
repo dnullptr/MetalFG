@@ -44,6 +44,10 @@ extern const char kMetalFGIsSyntheticKey;
                                         layer:(CAMetalLayer *)layer
                                 touchVelocity:(simd_float2)touchVelocity;
 
+// Option 3: Full 1-Frame Latency True Interpolation Pipeline (v2.0.0)
+- (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable;
+- (BOOL)presentCachedNativeFrameToDrawable:(id<CAMetalDrawable>)targetDrawable;
+
 // Check if a synthetic frame is currently processing on GPU
 - (BOOL)isGpuBusy;
 

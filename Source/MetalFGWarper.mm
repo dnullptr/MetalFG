@@ -206,12 +206,15 @@ static NSString * const kEmbeddedMetalSource = @""
 "        return currColor;\n"
 "    }\n"
 "    float2 warpedUV = clamp(in.texCoords - effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));\n"
-"    float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);\n"
-"    float warpDist = distance(warpedColor.rgb, currColor.rgb);\n"
-"    float confidence = smoothstep(uniforms.disocclusionThreshold * 1.6f, uniforms.disocclusionThreshold * 0.5f, warpDist);\n"
+"    float4 sampleCurr = sourceTexture.sample(linearSampler, warpedUV);\n"
+"    float2 uvPrev = clamp(in.texCoords + effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));\n"
+"    float4 samplePrev = prevTexture.sample(linearSampler, uvPrev);\n"
+"    float sampleDist = distance(sampleCurr.rgb, samplePrev.rgb);\n"
+"    float confidence = smoothstep(uniforms.disocclusionThreshold * 1.6f, uniforms.disocclusionThreshold * 0.5f, sampleDist);\n"
+"    float4 interpolated = mix(sampleCurr, samplePrev, 0.5f);\n"
 "    float mvMag = sqrt(mvLenSq);\n"
 "    float motionWeight = smoothstep(0.0004f, 0.0020f, mvMag) * confidence;\n"
-"    float4 finalColor = mix(currColor, warpedColor, motionWeight);\n"
+"    float4 finalColor = mix(currColor, interpolated, motionWeight);\n"
 "    if (uniforms.pad[0] > 0.5f) {\n"
 "        finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);\n"
 "    }\n"
@@ -740,6 +743,180 @@ static const MetalFGVertex kQuadVertices[6] = {
             strongSelf->_activeWriteIndex = (writeIdx == 0 ? 1 : 0);
             strongSelf->_hasValidBaseFrame = YES;
             os_unfair_lock_unlock(&strongSelf->_textureLock);
+        }
+    }];
+    
+    [cmdBuffer commit];
+    return YES;
+}
+
+- (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable {
+    if (!drawable || !_isReady) return NO;
+    id<MTLTexture> sourceTexture = drawable.texture;
+    if (!sourceTexture || sourceTexture.width < 250 || sourceTexture.height < 150) return NO;
+    
+    [self ensureTextureStorageForSource:sourceTexture];
+    
+    os_unfair_lock_lock(&_textureLock);
+    NSInteger writeIdx = _activeWriteIndex;
+    NSInteger readIdx = _activeReadIndex;
+    id<MTLTexture> destTexture = _cachedTextures[writeIdx];
+    id<MTLTexture> prevTexture = _cachedTextures[readIdx];
+    BOOL hasPrevFrame = _hasValidBaseFrame;
+    id<MTLTexture> rawMVTexture = _motionVectorTexture;
+    id<MTLTexture> smoothMVTexture = _smoothedMotionVectorTexture;
+    id<MTLComputePipelineState> bmePipeline = _bmePipelineState;
+    id<MTLComputePipelineState> medianPipeline = _medianPipelineState;
+    id<MTLRenderPipelineState> warpPipeline = _pipelineState;
+    id<MTLBuffer> vertexBuffer = _vertexBuffer;
+    os_unfair_lock_unlock(&_textureLock);
+    
+    if (!destTexture) return NO;
+    
+    id<MTLCommandBuffer> cmdBuffer = [_commandQueue commandBuffer];
+    cmdBuffer.label = @"com.metalfg.processAndInterpolate";
+    
+    // Pass 1: Copy native frame into double-buffered cache (saving Frame N)
+    id<MTLBlitCommandEncoder> blit = [cmdBuffer blitCommandEncoder];
+    [blit copyFromTexture:sourceTexture
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(sourceTexture.width, sourceTexture.height, 1)
+                toTexture:destTexture
+         destinationSlice:0
+         destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    
+    BOOL didInterpolate = NO;
+    
+    if (hasPrevFrame && prevTexture && bmePipeline && rawMVTexture && warpPipeline) {
+        // Pass 2: Block Motion Estimation between Frame N-1 and Frame N
+        id<MTLComputeCommandEncoder> comp = [cmdBuffer computeCommandEncoder];
+        comp.label = @"com.metalfg.bmePass";
+        [comp setComputePipelineState:bmePipeline];
+        [comp setTexture:prevTexture atIndex:MetalFGBMETexturePrev];
+        [comp setTexture:destTexture atIndex:MetalFGBMETextureCurr];
+        [comp setTexture:rawMVTexture atIndex:MetalFGBMETextureMotionVectors];
+        
+        simd_float2 touchVel = [[MetalFGTouchTracker sharedTracker] normalizedVelocityForScreenSize:CGSizeMake(sourceTexture.width, sourceTexture.height)];
+        MetalFGBMEUniforms bmeUniforms;
+        bmeUniforms.touchVelocity = touchVel;
+        bmeUniforms.gridDimensions = simd_make_uint2(kGridWidth, kGridHeight);
+        bmeUniforms.uiThreshold = self.uiSensitivity;
+        bmeUniforms.searchRadius = 0.040f;
+        bmeUniforms.maxDisplacement = 0.035f;
+        bmeUniforms.pad = 0.0f;
+        [comp setBytes:&bmeUniforms length:sizeof(bmeUniforms) atIndex:MetalFGBufferIndexBMEUniforms];
+        
+        MTLSize threadsPerGroup = MTLSizeMake(16, 16, 1);
+        MTLSize threadgroups = MTLSizeMake((kGridWidth + 15) / 16, (kGridHeight + 15) / 16, 1);
+        [comp dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+        [comp endEncoding];
+        
+        id<MTLTexture> mvToUse = rawMVTexture;
+        if (medianPipeline && smoothMVTexture) {
+            id<MTLComputeCommandEncoder> medComp = [cmdBuffer computeCommandEncoder];
+            medComp.label = @"com.metalfg.medianSmoothPass";
+            [medComp setComputePipelineState:medianPipeline];
+            [medComp setTexture:rawMVTexture atIndex:MetalFGSmoothTextureInput];
+            [medComp setTexture:smoothMVTexture atIndex:MetalFGSmoothTextureOutput];
+            [medComp dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+            [medComp endEncoding];
+            mvToUse = smoothMVTexture;
+        }
+        
+        // Pass 3: Bidirectional Interpolation Render Pass into drawable
+        MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
+        passDesc.colorAttachments[0].texture = drawable.texture;
+        passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
+        
+        id<MTLRenderCommandEncoder> enc = [cmdBuffer renderCommandEncoderWithDescriptor:passDesc];
+        [enc setRenderPipelineState:warpPipeline];
+        [enc setVertexBuffer:vertexBuffer offset:0 atIndex:MetalFGBufferIndexVertices];
+        [enc setFragmentTexture:destTexture atIndex:MetalFGTextureIndexSource]; // Frame N
+        [enc setFragmentTexture:mvToUse atIndex:MetalFGTextureIndexMotionVectors];
+        [enc setFragmentTexture:prevTexture atIndex:MetalFGTextureIndexPrev];   // Frame N-1
+        
+        MetalFGWarpUniforms warpUniforms;
+        warpUniforms.timeOffsetFactor = self.motionScale;
+        warpUniforms.disocclusionThreshold = self.disocclusionThreshold;
+        warpUniforms.pad[0] = self.debugTintEnabled ? 1.0f : 0.0f;
+        warpUniforms.pad[1] = 0.0f;
+        [enc setFragmentBytes:&warpUniforms length:sizeof(warpUniforms) atIndex:MetalFGBufferIndexWarpUniforms];
+        
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [enc endEncoding];
+        
+        didInterpolate = YES;
+    }
+    
+    // Tag drawable to prevent recursive presentation hooking
+    objc_setAssociatedObject(drawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    
+    // Present drawable directly (displays S_{N-0.5} if interpolated, or F_0 if first frame)
+    [cmdBuffer presentDrawable:drawable];
+    
+    _inFlightGpuFrames.fetch_add(1);
+    
+    // Update activeReadIndex to point to the newly cached Frame N
+    os_unfair_lock_lock(&_textureLock);
+    _activeReadIndex = writeIdx;
+    _activeWriteIndex = (writeIdx == 0 ? 1 : 0);
+    _hasValidBaseFrame = YES;
+    os_unfair_lock_unlock(&_textureLock);
+    
+    __weak MetalFGWarper *weakSelf = self;
+    [cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+        MetalFGWarper *strongSelf = weakSelf;
+        if (strongSelf) {
+            strongSelf->_inFlightGpuFrames.fetch_sub(1);
+        }
+    }];
+    
+    [cmdBuffer commit];
+    return didInterpolate;
+}
+
+- (BOOL)presentCachedNativeFrameToDrawable:(id<CAMetalDrawable>)targetDrawable {
+    if (!targetDrawable || !_isReady) return NO;
+    
+    os_unfair_lock_lock(&_textureLock);
+    if (!_hasValidBaseFrame) {
+        os_unfair_lock_unlock(&_textureLock);
+        return NO;
+    }
+    id<MTLTexture> nativeTex = _cachedTextures[_activeReadIndex];
+    os_unfair_lock_unlock(&_textureLock);
+    
+    if (!nativeTex) return NO;
+    
+    id<MTLCommandBuffer> cmdBuffer = [_commandQueue commandBuffer];
+    cmdBuffer.label = @"com.metalfg.presentCachedNative";
+    
+    id<MTLBlitCommandEncoder> blit = [cmdBuffer blitCommandEncoder];
+    [blit copyFromTexture:nativeTex
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(nativeTex.width, nativeTex.height, 1)
+                toTexture:targetDrawable.texture
+         destinationSlice:0
+         destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+    
+    objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [cmdBuffer presentDrawable:targetDrawable];
+    
+    _inFlightGpuFrames.fetch_add(1);
+    __weak MetalFGWarper *weakSelf = self;
+    [cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+        MetalFGWarper *strongSelf = weakSelf;
+        if (strongSelf) {
+            strongSelf->_inFlightGpuFrames.fetch_sub(1);
         }
     }];
     

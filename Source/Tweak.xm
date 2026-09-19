@@ -169,11 +169,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         return;
     }
     
-    CFTimeInterval now = CACurrentMediaTime();
-    
-    [[MetalFGSynchronizer sharedSynchronizer] notifyNativeFramePresented:texture
-                                                                   layer:drawable.layer
-                                                             atTimestamp:now];
+    [[MetalFGSynchronizer sharedSynchronizer] notifyNativeFrameRendered:drawable];
 }
 
 // ============================================================================
@@ -206,6 +202,14 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
         NSNumber *isSynthetic = objc_getAssociatedObject(metalDrawable, &kMetalFGIsSyntheticKey);
         if (!isSynthetic || ![isSynthetic boolValue]) {
+            id<MTLTexture> tex = metalDrawable.texture;
+            BOOL isGameDrawable = (tex && tex.width >= 250 && tex.height >= 150 && IsGameLayerCandidate(metalDrawable.layer));
+            if (isGameDrawable && [MetalFGSynchronizer sharedSynchronizer].isEnabled) {
+                [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+                    ProcessNativePresentation(metalDrawable);
+                }];
+                return; // Suppress direct presentation: Option 3 presents S_{N-0.5} upon completion!
+            }
             [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
                 ProcessNativePresentation(metalDrawable);
             }];
@@ -219,6 +223,14 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
         NSNumber *isSynthetic = objc_getAssociatedObject(metalDrawable, &kMetalFGIsSyntheticKey);
         if (!isSynthetic || ![isSynthetic boolValue]) {
+            id<MTLTexture> tex = metalDrawable.texture;
+            BOOL isGameDrawable = (tex && tex.width >= 250 && tex.height >= 150 && IsGameLayerCandidate(metalDrawable.layer));
+            if (isGameDrawable && [MetalFGSynchronizer sharedSynchronizer].isEnabled) {
+                [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+                    ProcessNativePresentation(metalDrawable);
+                }];
+                return; // Suppress direct presentation: Option 3 presents S_{N-0.5} upon completion!
+            }
             [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
                 ProcessNativePresentation(metalDrawable);
             }];
@@ -232,14 +244,17 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         id<CAMetalDrawable> metalDrawable = (id<CAMetalDrawable>)drawable;
         NSNumber *isSynthetic = objc_getAssociatedObject(metalDrawable, &kMetalFGIsSyntheticKey);
         if (!isSynthetic || ![isSynthetic boolValue]) {
+            id<MTLTexture> tex = metalDrawable.texture;
+            BOOL isGameDrawable = (tex && tex.width >= 250 && tex.height >= 150 && IsGameLayerCandidate(metalDrawable.layer));
+            if (isGameDrawable && [MetalFGSynchronizer sharedSynchronizer].isEnabled) {
+                [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+                    ProcessNativePresentation(metalDrawable);
+                }];
+                return; // Suppress direct presentation: Option 3 presents S_{N-0.5} upon completion!
+            }
             [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
                 ProcessNativePresentation(metalDrawable);
             }];
-            if ([MetalFGSynchronizer sharedSynchronizer].isEnabled) {
-                CFTimeInterval durationCap = duration / 2.0;
-                %orig(drawable, durationCap);
-                return;
-            }
         }
     }
     %orig(drawable, duration);

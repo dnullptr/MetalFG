@@ -275,19 +275,25 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
         return currColor;
     }
     
-    // 4. Sample warped pixel along forward motion vector
-    float2 warpedUV = clamp(in.texCoords - effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));
-    float4 warpedColor = sourceTexture.sample(linearSampler, warpedUV);
+    // 4. True Bidirectional Interpolation:
+    // Sample Frame N warped backward to t = 0.5:
+    float2 uvCurr = clamp(in.texCoords - effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));
+    float4 sampleCurr = sourceTexture.sample(linearSampler, uvCurr);
     
-    // 5. Anti-Ghosting & Disocclusion Rejection:
-    // If the warped color diverges excessively from both current and previous,
-    // it is a newly revealed background seam. Blend back towards currColor to eliminate ghosting.
-    float warpDist = distance(warpedColor.rgb, currColor.rgb);
-    float confidence = smoothstep(uniforms.disocclusionThreshold * 1.6f, uniforms.disocclusionThreshold * 0.5f, warpDist);
+    // Sample Frame N-1 warped forward to t = 0.5:
+    float2 uvPrev = clamp(in.texCoords + effMV * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f));
+    float4 samplePrev = prevTexture.sample(linearSampler, uvPrev);
+    
+    // 5. Bidirectional Blending & Disocclusion Confidence:
+    // Ground-truth midpoint is a 50/50 blend between both frames.
+    // When disocclusion occurs, confidence smoothly clamps back to currColor to prevent ghosting.
+    float sampleDist = distance(sampleCurr.rgb, samplePrev.rgb);
+    float confidence = smoothstep(uniforms.disocclusionThreshold * 1.6f, uniforms.disocclusionThreshold * 0.5f, sampleDist);
+    float4 interpolated = mix(sampleCurr, samplePrev, 0.5f);
     
     float mvMag = sqrt(mvLenSq);
     float motionWeight = smoothstep(0.0004f, 0.0020f, mvMag) * confidence;
-    float4 finalColor = mix(currColor, warpedColor, motionWeight);
+    float4 finalColor = mix(currColor, interpolated, motionWeight);
     
     if (uniforms.pad[0] > 0.5f) {
         finalColor.g = min(1.0f, finalColor.g * 1.25f + 0.08f);

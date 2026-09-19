@@ -19,6 +19,8 @@
     
     BOOL _isBackgrounded;
     BOOL _hasInjectedForCurrentNativeFrame;
+    BOOL _hasPendingNativePresent;
+    CFTimeInterval _smoothedNativeInterval;
 }
 
 @end
@@ -160,6 +162,8 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         _shouldStopThread = NO;
         _isBackgrounded = NO;
         _hasInjectedForCurrentNativeFrame = NO;
+        _hasPendingNativePresent = NO;
+        _smoothedNativeInterval = 1.0 / 60.0;
         _nativeFrameCount = 0;
         _syntheticFrameCount = 0;
         _lastStatsLogTime = CACurrentMediaTime();
@@ -273,6 +277,49 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     }
 }
 
+- (void)notifyNativeFrameRendered:(id<CAMetalDrawable>)drawable {
+    if (_isBackgrounded || !drawable) return;
+    
+    id<MTLTexture> texture = drawable.texture;
+    if (!texture || texture.width < 250 || texture.height < 150) {
+        return;
+    }
+    
+    CFTimeInterval now = CACurrentMediaTime();
+    
+    os_unfair_lock_lock(&_syncLock);
+    CFTimeInterval interval = now - _lastNativeFrameTime;
+    if (interval > 0.005 && interval < 0.200) {
+        _smoothedNativeInterval = _smoothedNativeInterval * 0.85 + interval * 0.15;
+    }
+    _lastNativeFrameTime = now;
+    _nativeFrameCount++;
+    if (drawable.layer && drawable.layer != _activeLayer) {
+        _activeLayer = drawable.layer;
+    }
+    MetalFGWarper *currentWarper = _warper;
+    BOOL enabled = _isEnabled;
+    os_unfair_lock_unlock(&_syncLock);
+    
+    if (enabled && currentWarper) {
+        // Option 3: Full 1-Frame Latency True Interpolation Model (LSFG / DLSS 3)
+        // 1. Warper saves Ground Truth Frame N into double-buffered cache.
+        // 2. Warper computes bidirectional motion field between Frame N-1 and Frame N.
+        // 3. Warper synthesizes S_{N-0.5} into the native drawable and presents it immediately.
+        BOOL didInterpolate = [currentWarper processAndInterpolateNativeDrawable:drawable];
+        
+        os_unfair_lock_lock(&_syncLock);
+        if (didInterpolate) {
+            _syntheticFrameCount++;
+            _hasPendingNativePresent = YES;
+        } else {
+            // First frame after startup/toggle: Frame 0 was presented directly as F_0
+            _hasPendingNativePresent = NO;
+        }
+        os_unfair_lock_unlock(&_syncLock);
+    }
+}
+
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture
                              layer:(nullable CAMetalLayer *)layer
                        atTimestamp:(CFTimeInterval)timestamp {
@@ -334,16 +381,13 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         
         os_unfair_lock_lock(&_syncLock);
         CFTimeInterval lastNative = _lastNativeFrameTime;
-        BOOL alreadyInjected = _hasInjectedForCurrentNativeFrame;
+        BOOL pendingNative = _hasPendingNativePresent;
+        CFTimeInterval smoothedInterval = _smoothedNativeInterval;
         CAMetalLayer *layer = _activeLayer;
         MetalFGWarper *warper = _warper;
         os_unfair_lock_unlock(&_syncLock);
         
-        if (!layer || !warper || !warper.isReady) return;
-        
-        // STRICT 1:1 FRAME PACING:
-        // Enforce exactly 1 synthetic frame per native frame.
-        if (alreadyInjected) return;
+        if (!pendingNative || !layer || !warper || !warper.isReady) return;
         
         // Ignore HUD/sub-layers smaller than 250x150
         CGSize drawableSize = layer.drawableSize;
@@ -352,32 +396,26 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         CFTimeInterval now = CACurrentMediaTime();
         CFTimeInterval elapsed = now - lastNative;
         
-        // Midpoint Pacing Window:
-        // For a 60 FPS native game (~16.6ms per frame), the midpoint VSYNC is at ~8.33ms.
-        // If this tick occurs too soon (< 3.5ms) after native frame completion, it belongs to the
-        // native frame's own VSYNC refresh cycle. Wait for the intermediate 8.33ms tick!
-        if (elapsed < 0.0035) {
+        // Dynamic Midpoint Pacing Window:
+        // For a 60 FPS native game (smoothedInterval ~ 16.6ms), the midpoint VSYNC is at ~8.33ms.
+        // For a 30 FPS native game (smoothedInterval ~ 33.3ms), the midpoint VSYNC is at ~16.66ms.
+        // Wait until elapsed >= smoothedInterval * 0.40 before presenting cached ground-truth Frame N.
+        CFTimeInterval minMidpointElapsed = smoothedInterval * 0.40;
+        if (elapsed < minMidpointElapsed) {
             return;
         }
         
-        // Idle guard: if no native frame has arrived in > 150ms (paused, loading, static UI)
-        if (elapsed > 0.150) {
-            return;
-        }
-        
-        // Backpressure guard
+        // Backpressure guard: drop presentation if GPU has pending tasks
         if ([warper isGpuBusy]) return;
         
-        id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
-        if (!syntheticDrawable || !syntheticDrawable.texture) return;
+        id<CAMetalDrawable> nativeDrawable = [layer nextDrawable];
+        if (!nativeDrawable || !nativeDrawable.texture) return;
         
-        CFTimeInterval targetPresentationTime = link.targetTimestamp;
-        BOOL rendered = [warper renderSyntheticFrameToDrawable:syntheticDrawable
-                                                targetTimeHint:targetPresentationTime];
-        if (rendered) {
+        // Present cached Ground Truth Frame N onto the display for the second half of the refresh cycle
+        BOOL presented = [warper presentCachedNativeFrameToDrawable:nativeDrawable];
+        if (presented) {
             os_unfair_lock_lock(&_syncLock);
-            _syntheticFrameCount++;
-            _hasInjectedForCurrentNativeFrame = YES;
+            _hasPendingNativePresent = NO;
             os_unfair_lock_unlock(&_syncLock);
         }
     }
