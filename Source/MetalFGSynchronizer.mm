@@ -38,6 +38,7 @@
 
 static NSString * const kRootlessPrefsPath = @"/var/jb/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist";
 static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist";
+static NSString * const kCurrentPrefsSchema = @"2.3.0";
 
 - (NSString *)preferencesFilePath {
     if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
@@ -49,50 +50,26 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
 - (void)loadPreferences {
     NSString *path = [self preferencesFilePath];
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
-    if (dict) {
-        if (dict[@"isEnabled"] != nil) {
-            _isEnabled = [dict[@"isEnabled"] boolValue];
-        } else {
-            _isEnabled = YES;
-        }
-        if (dict[@"currentPreset"] != nil) {
-            _currentPreset = [dict[@"currentPreset"] integerValue];
-        } else {
-            _currentPreset = 0; // Default to Crisp (user's preferred clean baseline)
-        }
-        if (dict[@"motionScale"] != nil) {
-            _motionScale = [dict[@"motionScale"] floatValue];
-        } else {
-            _motionScale = 0.45f;
-        }
-        if (dict[@"disocclusionThreshold"] != nil) {
-            _disocclusionThreshold = [dict[@"disocclusionThreshold"] floatValue];
-        } else {
-            _disocclusionThreshold = 0.16f;
-        }
-        if (dict[@"uiSensitivity"] != nil) {
-            _uiSensitivity = [dict[@"uiSensitivity"] floatValue];
-        } else {
-            _uiSensitivity = 0.036f;
-        }
-        if (dict[@"motionDeadzone"] != nil) {
-            _motionDeadzone = [dict[@"motionDeadzone"] floatValue];
-        } else {
-            _motionDeadzone = 0.0004f;
-        }
-        if (dict[@"debugTint"] != nil) {
-            _debugTint = [dict[@"debugTint"] boolValue];
-        } else {
-            _debugTint = NO;
-        }
+    NSString *savedSchema = dict ? dict[@"prefsVersion"] : nil;
+    
+    if (dict && [savedSchema isEqualToString:kCurrentPrefsSchema]) {
+        _isEnabled = (dict[@"isEnabled"] != nil) ? [dict[@"isEnabled"] boolValue] : YES;
+        _currentPreset = (dict[@"currentPreset"] != nil) ? [dict[@"currentPreset"] integerValue] : 1;
+        _motionScale = (dict[@"motionScale"] != nil) ? [dict[@"motionScale"] floatValue] : 0.50f;
+        _disocclusionThreshold = (dict[@"disocclusionThreshold"] != nil) ? [dict[@"disocclusionThreshold"] floatValue] : 0.18f;
+        _uiSensitivity = (dict[@"uiSensitivity"] != nil) ? [dict[@"uiSensitivity"] floatValue] : 0.035f;
+        _motionDeadzone = (dict[@"motionDeadzone"] != nil) ? [dict[@"motionDeadzone"] floatValue] : 0.0003f;
+        _debugTint = (dict[@"debugTint"] != nil) ? [dict[@"debugTint"] boolValue] : NO;
     } else {
-        _isEnabled = YES;
-        _currentPreset = 0; // Crisp (SMFG 1.1 default)
-        _motionScale = 0.45f;
-        _disocclusionThreshold = 0.16f;
-        _uiSensitivity = 0.036f;
-        _motionDeadzone = 0.0004f;
-        _debugTint = NO;
+        // Initialize clean v2.3.0 defaults (True 50% Midpoint Interpolation)
+        _isEnabled = (dict && dict[@"isEnabled"] != nil) ? [dict[@"isEnabled"] boolValue] : YES;
+        _currentPreset = 1; // Balanced (True 50% Midpoint)
+        _motionScale = 0.50f;
+        _disocclusionThreshold = 0.18f;
+        _uiSensitivity = 0.035f;
+        _motionDeadzone = 0.0003f;
+        _debugTint = (dict && dict[@"debugTint"] != nil) ? [dict[@"debugTint"] boolValue] : NO;
+        [self savePreferences];
     }
 }
 
@@ -102,6 +79,7 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     
     NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    dict[@"prefsVersion"] = kCurrentPrefsSchema;
     dict[@"isEnabled"] = @(_isEnabled);
     dict[@"currentPreset"] = @(_currentPreset);
     dict[@"motionScale"] = @(_motionScale);
@@ -115,22 +93,22 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
 - (void)applyPreset:(NSInteger)presetIndex {
     _currentPreset = presetIndex;
     switch (presetIndex) {
-        case 0: // Crisp (SMFG 1.1: Sharp Catmull-Rom read, tight edge resolve, zero ghosting)
-            self.motionScale = 0.45f;
-            self.disocclusionThreshold = 0.16f;
-            self.uiSensitivity = 0.036f;
+        case 0: // Crisp (True 50% Midpoint + tight disocclusion cutoff for zero ghosting)
+            self.motionScale = 0.50f;
+            self.disocclusionThreshold = 0.14f;
+            self.uiSensitivity = 0.038f;
             self.motionDeadzone = 0.0004f;
             break;
         case 1: // Balanced (True 50% Midpoint + SMFG Round 53 head/silhouette occlusion guard)
             self.motionScale = 0.50f;
-            self.disocclusionThreshold = 0.20f;
-            self.uiSensitivity = 0.032f;
+            self.disocclusionThreshold = 0.18f;
+            self.uiSensitivity = 0.035f;
             self.motionDeadzone = 0.0003f;
             break;
-        case 2: // Ultra Smooth (Full 50% Midpoint + wide bilateral fluid motion field)
+        case 2: // Ultra Smooth (True 50% Midpoint + wide bilateral fluid blend)
             self.motionScale = 0.50f;
-            self.disocclusionThreshold = 0.25f;
-            self.uiSensitivity = 0.026f;
+            self.disocclusionThreshold = 0.24f;
+            self.uiSensitivity = 0.028f;
             self.motionDeadzone = 0.0002f;
             break;
         default:
@@ -227,6 +205,7 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
 - (void)handleAppDidEnterBackground {
     os_unfair_lock_lock(&_syncLock);
     _isBackgrounded = YES;
+    _hasPendingNativePresent = NO;
     if (_displayLink) {
         _displayLink.paused = YES;
     }
@@ -341,8 +320,9 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
     if (enabled && currentWarper) {
         // Option 3: Full 1-Frame Latency True Interpolation Model (LSFG / DLSS 3)
         // 1. Warper saves Ground Truth Frame N into double-buffered cache.
-        // 2. Warper computes bidirectional motion field between Frame N-1 and Frame N.
-        // 3. Warper synthesizes S_{N-0.5} into the native drawable and presents it immediately.
+        // 2. Warper computes coarse-to-fine motion field between Frame N-1 and Frame N.
+        // 3. Warper synthesizes S_{N-0.5} into the native drawable and presents it with
+        //    afterMinimumDuration:(1/120 - 0.0005) (latches on VSYNC Tick 2k for 8.33ms).
         BOOL didInterpolate = [currentWarper processAndInterpolateNativeDrawable:drawable];
         
         os_unfair_lock_lock(&_syncLock);
@@ -362,7 +342,6 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
                        atTimestamp:(CFTimeInterval)timestamp {
     if (_isBackgrounded || !texture) return;
     
-    // Ignore small HUD textures (e.g. CAPerfHud / MetalHUD: typically < 250x150)
     if (texture.width < 250 || texture.height < 150) {
         return;
     }
@@ -417,9 +396,7 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         if (!_isEnabled) return;
         
         os_unfair_lock_lock(&_syncLock);
-        CFTimeInterval lastNative = _lastNativeFrameTime;
         BOOL pendingNative = _hasPendingNativePresent;
-        CFTimeInterval smoothedInterval = _smoothedNativeInterval;
         CAMetalLayer *layer = _activeLayer;
         MetalFGWarper *warper = _warper;
         os_unfair_lock_unlock(&_syncLock);
@@ -430,25 +407,16 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         CGSize drawableSize = layer.drawableSize;
         if (drawableSize.width < 250.0 || drawableSize.height < 150.0) return;
         
-        CFTimeInterval now = CACurrentMediaTime();
-        CFTimeInterval elapsed = now - lastNative;
-        
-        // Dynamic Midpoint Pacing Window:
-        // For a 60 FPS native game (smoothedInterval ~ 16.6ms), the midpoint VSYNC is at ~8.33ms.
-        // For a 30 FPS native game (smoothedInterval ~ 33.3ms), the midpoint VSYNC is at ~16.66ms.
-        // Wait until elapsed >= smoothedInterval * 0.40 before presenting cached ground-truth Frame N.
-        CFTimeInterval minMidpointElapsed = smoothedInterval * 0.40;
-        if (elapsed < minMidpointElapsed) {
-            return;
-        }
-        
-        // Backpressure guard: drop presentation if GPU has pending tasks
+        // Wait only until S_{N-0.5} has finished rendering on the GPU (typically ~0.6ms).
+        // Because S_{N-0.5} was presented with afterMinimumDuration:(1/120 - 0.0005),
+        // CARenderServer guarantees S_{N-0.5} stays visible for a full 8.33ms 120Hz cycle
+        // and automatically latches Ground Truth Frame N on the very next 120Hz VSYNC tick!
         if ([warper isGpuBusy]) return;
         
         id<CAMetalDrawable> nativeDrawable = [layer nextDrawable];
         if (!nativeDrawable || !nativeDrawable.texture) return;
         
-        // Present cached Ground Truth Frame N onto the display for the second half of the refresh cycle
+        // Present cached Ground Truth Frame N onto the display for the second 120Hz refresh cycle
         BOOL presented = [warper presentCachedNativeFrameToDrawable:nativeDrawable];
         if (presented) {
             os_unfair_lock_lock(&_syncLock);

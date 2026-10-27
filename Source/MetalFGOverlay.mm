@@ -147,7 +147,7 @@
         [content addSubview:titleLabel];
         
         UILabel *verLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 30, 210, 14)];
-        verLabel.text = @"v2.2.0 • SMFG 1.1 Super-Motion";
+        verLabel.text = @"v2.3.0 • SMFG 1.1 True-Midpoint";
         verLabel.textColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.45 alpha:0.9];
         verLabel.font = [UIFont monospacedDigitSystemFontOfSize:9.5 weight:UIFontWeightMedium];
         [content addSubview:verLabel];

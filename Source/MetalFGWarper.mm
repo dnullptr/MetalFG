@@ -9,7 +9,10 @@ extern "C" const char kMetalFGIsSyntheticKey = '\0';
 static const uint32_t kGridWidth = 80;
 static const uint32_t kGridHeight = 45;
 
-// Embedded fallback Metal Shading Language source (SMFG 1.1 Super-Motion Engine)
+// 120Hz ProMotion minimum frame duration (8.33ms minus 0.5ms VSYNC clock jitter tolerance)
+static const CFTimeInterval kProMotion120HzMinDuration = (1.0 / 120.0) - 0.0005;
+
+// Embedded fallback Metal Shading Language source (SMFG 1.1 Super-Motion Engine v2.3.0)
 static NSString * const kEmbeddedMetalSource = @""
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
@@ -95,7 +98,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "                                           constant MetalFGBMEUniforms &uniforms [[buffer(0)]]) {\n"
 "    if (gid.x >= uniforms.gridDimensions.x || gid.y >= uniforms.gridDimensions.y) return;\n"
 "    float2 centerUV = (float2(gid) + 0.5f) / float2(uniforms.gridDimensions);\n"
-"    bool isHUDZone = (centerUV.y < 0.16f) || (centerUV.x < 0.32f && centerUV.y > 0.58f) || (centerUV.x > 0.68f && centerUV.y > 0.58f);\n"
+"    bool isHUDZone = (centerUV.y < 0.14f) || (centerUV.x < 0.28f && centerUV.y > 0.62f) || (centerUV.x > 0.72f && centerUV.y > 0.62f);\n"
 "    const float dUV = 0.0022f;\n"
 "    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);\n"
 "    float2 uvsCurr[9];\n"
@@ -117,22 +120,17 @@ static NSString * const kEmbeddedMetalSource = @""
 "    }\n"
 "    patchContrast *= (1.0f / 9.0f);\n"
 "    float errZero = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, float2(0.0f, 0.0f));\n"
-"    float effectiveThreshold = isHUDZone ? (uniforms.uiThreshold * 1.1f) : (uniforms.uiThreshold * 0.15f);\n"
-"    if (errZero < effectiveThreshold && (isHUDZone || patchContrast > 0.015f)) {\n"
+"    if (isHUDZone && errZero < uniforms.uiThreshold * 0.65f && patchContrast > 0.020f) {\n"
 "        float sureZero = saturate(patchContrast * 12.0f);\n"
 "        motionVectors.write(float4(0.0f, 0.0f, errZero, sureZero), gid);\n"
 "        return;\n"
 "    }\n"
-"    const float kMargin = 0.0018f;\n"
-"    const float kDistPenalty = isHUDZone ? 0.45f : 0.08f;\n"
+"    const float kMargin = 0.0006f;\n"
+"    const float kDistPenalty = isHUDZone ? 0.25f : 0.025f;\n"
 "    float bestError = errZero;\n"
 "    float bestCost = errZero;\n"
 "    float2 bestVector = float2(0.0f, 0.0f);\n"
 "    float2 prior = uniforms.touchVelocity;\n"
-"    const float r1 = 0.0012f;\n"
-"    const float r2 = 0.0036f;\n"
-"    const float r3 = 0.0085f;\n"
-"    const float r4 = clamp(uniforms.searchRadius * 0.50f, 0.016f, uniforms.maxDisplacement);\n"
 "    const float2 dirs[8] = {\n"
 "        float2( 1.0f,  0.0f), float2(-1.0f,  0.0f),\n"
 "        float2( 0.0f,  1.0f), float2( 0.0f, -1.0f),\n"
@@ -144,35 +142,36 @@ static NSString * const kEmbeddedMetalSource = @""
 "        float costPrior = errPrior + kMargin * 0.5f;\n"
 "        if (costPrior < bestCost) { bestCost = costPrior; bestError = errPrior; bestVector = prior; }\n"
 "    }\n"
-"    for (int i = 0; i < 8; i++) {\n"
-"        float2 cand = dirs[i] * r1;\n"
-"        float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);\n"
-"        float cost = err + kMargin + kDistPenalty * length(cand - prior);\n"
-"        if (cost < bestCost) { bestCost = cost; bestError = err; bestVector = cand; }\n"
+"    const float seedRadii[4] = {\n"
+"        0.0018f,\n"
+"        0.0048f,\n"
+"        0.0110f,\n"
+"        clamp(uniforms.searchRadius * 0.50f, 0.018f, uniforms.maxDisplacement)\n"
+"    };\n"
+"    for (int r = 0; r < 4; r++) {\n"
+"        float rad = seedRadii[r];\n"
+"        for (int i = 0; i < 8; i++) {\n"
+"            float2 cand = dirs[i] * rad;\n"
+"            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);\n"
+"            float cost = err + kMargin + kDistPenalty * length(cand - prior);\n"
+"            if (cost < bestCost) { bestCost = cost; bestError = err; bestVector = cand; }\n"
+"        }\n"
 "    }\n"
-"    for (int i = 0; i < 8; i++) {\n"
-"        float2 cand = dirs[i] * r2;\n"
-"        float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);\n"
-"        float cost = err + kMargin + kDistPenalty * length(cand - prior);\n"
-"        if (cost < bestCost) { bestCost = cost; bestError = err; bestVector = cand; }\n"
+"    const float refineSteps[3] = { 0.0040f, 0.0020f, 0.0009f };\n"
+"    for (int sIdx = 0; sIdx < 3; sIdx++) {\n"
+"        float stepSize = refineSteps[sIdx];\n"
+"        float2 centerCand = bestVector;\n"
+"        for (int i = 0; i < 8; i++) {\n"
+"            float2 cand = centerCand + dirs[i] * stepSize;\n"
+"            float candLen = length(cand);\n"
+"            if (candLen > uniforms.maxDisplacement) cand = (cand / candLen) * uniforms.maxDisplacement;\n"
+"            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);\n"
+"            float cost = err + kMargin * 0.5f + kDistPenalty * length(cand - prior);\n"
+"            if (cost < bestCost) { bestCost = cost; bestError = err; bestVector = cand; }\n"
+"        }\n"
 "    }\n"
-"    for (int i = 0; i < 8; i++) {\n"
-"        float2 cand = dirs[i] * r3;\n"
-"        float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);\n"
-"        float cost = err + kMargin + kDistPenalty * length(cand - prior);\n"
-"        if (cost < bestCost) { bestCost = cost; bestError = err; bestVector = cand; }\n"
-"    }\n"
-"    float2 coarseBase = (dot(prior, prior) > 1e-6f) ? prior : bestVector;\n"
-"    for (int i = 0; i < 8; i++) {\n"
-"        float2 cand = coarseBase + dirs[i] * r4;\n"
-"        float candLen = length(cand);\n"
-"        if (candLen > uniforms.maxDisplacement) cand = (cand / candLen) * uniforms.maxDisplacement;\n"
-"        float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);\n"
-"        float cost = err + kMargin + kDistPenalty * length(cand - prior);\n"
-"        if (cost < bestCost) { bestCost = cost; bestError = err; bestVector = cand; }\n"
-"    }\n"
-"    if (dot(bestVector, bestVector) > 1e-8f && patchContrast > 0.008f) {\n"
-"        const float stepUV = 0.0008f;\n"
+"    if (dot(bestVector, bestVector) > 1e-8f && patchContrast > 0.005f) {\n"
+"        const float stepUV = 0.0005f;\n"
 "        float ex0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2(-stepUV, 0.0f));\n"
 "        float ex1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2( stepUV, 0.0f));\n"
 "        float ey0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2(0.0f, -stepUV));\n"
@@ -186,13 +185,13 @@ static NSString * const kEmbeddedMetalSource = @""
 "        float errSubpel = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, subpelCand);\n"
 "        if (errSubpel <= bestError) { bestError = errSubpel; bestVector = subpelCand; }\n"
 "    }\n"
-"    if (bestError >= errZero - 0.0008f) {\n"
+"    if (bestError >= errZero - 0.0003f) {\n"
 "        bestVector = float2(0.0f, 0.0f);\n"
 "        bestError = errZero;\n"
 "    }\n"
 "    float finalLen = length(bestVector);\n"
 "    if (finalLen > uniforms.maxDisplacement) bestVector = (bestVector / finalLen) * uniforms.maxDisplacement;\n"
-"    float sure = saturate(patchContrast * 10.0f) * saturate(1.0f - bestError / (0.045f + patchContrast));\n"
+"    float sure = saturate(patchContrast * 12.0f) * saturate(1.0f - bestError / (0.045f + patchContrast));\n"
 "    motionVectors.write(float4(bestVector, bestError, sure), gid);\n"
 "}\n"
 "\n"
@@ -244,10 +243,10 @@ static NSString * const kEmbeddedMetalSource = @""
 "            largeWeight += w;\n"
 "        }\n"
 "    }\n"
-"    if (largeWeight > 0.20f) {\n"
+"    if (largeWeight > 0.15f) {\n"
 "        float2 largeMV = largeSum / largeWeight;\n"
-"        ownMV = mix(largeMV, ownMV, saturate(ownSure * 2.5f));\n"
-"        ownSure = max(ownSure, min(0.7f, largeWeight * 0.08f));\n"
+"        ownMV = mix(largeMV, ownMV, saturate(ownSure * 2.2f));\n"
+"        ownSure = max(ownSure, min(0.75f, largeWeight * 0.08f));\n"
 "    }\n"
 "    float spread = 0.0020f + 0.25f * length(ownMV);\n"
 "    float2 fluidSum = float2(0.0f);\n"
@@ -284,8 +283,12 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float4 mvData = motionVectors.sample(linearSampler, uv);\n"
 "    float2 mv = mvData.xy;\n"
 "    float edgeSpread = mvData.w;\n"
-"    float2 mvBack = motionVectors.sample(linearSampler, clamp(uv - mv * uniforms.timeOffsetFactor, float2(0.001f), float2(0.999f))).xy;\n"
-"    float2 effMV = (dot(mvBack, mvBack) > dot(mv, mv) * 1.15f) ? mvBack : mv;\n"
+"    float t = uniforms.timeOffsetFactor;\n"
+"    float2 mvFwd  = motionVectors.sample(linearSampler, clamp(uv + mv * t, float2(0.001f), float2(0.999f))).xy;\n"
+"    float2 mvBack = motionVectors.sample(linearSampler, clamp(uv - mv * t, float2(0.001f), float2(0.999f))).xy;\n"
+"    float2 effMV = mv;\n"
+"    if (dot(mvFwd, mvFwd) > dot(effMV, effMV) * 1.15f) effMV = mvFwd;\n"
+"    if (dot(mvBack, mvBack) > dot(effMV, effMV) * 1.15f) effMV = mvBack;\n"
 "    float mvMag = length(effMV);\n"
 "    if (mvMag < uniforms.motionDeadzone) {\n"
 "        if (uniforms.debugTint > 0.5f) { currColor.b = min(1.0f, currColor.b * 1.25f + 0.10f); }\n"
@@ -293,36 +296,21 @@ static NSString * const kEmbeddedMetalSource = @""
 "    }\n"
 "    float3 dStatic = abs(currColor.rgb - prevColor.rgb);\n"
 "    float staticDiff = max(dStatic.r, max(dStatic.g, dStatic.b));\n"
-"    float lumaCurr = rgb_to_luma(currColor.rgb);\n"
-"    float lumaPrev = rgb_to_luma(prevColor.rgb);\n"
-"    float aroundCurr = rgb_to_luma(sourceTexture.sample(linearSampler, uv + float2(-texelSize.x, 0.0f)).rgb +\n"
-"                                   sourceTexture.sample(linearSampler, uv + float2( texelSize.x, 0.0f)).rgb +\n"
-"                                   sourceTexture.sample(linearSampler, uv + float2(0.0f, -texelSize.y)).rgb +\n"
-"                                   sourceTexture.sample(linearSampler, uv + float2(0.0f,  texelSize.y)).rgb) * 0.25f;\n"
-"    float aroundPrev = rgb_to_luma(prevTexture.sample(linearSampler, uv + float2(-texelSize.x, 0.0f)).rgb +\n"
-"                                   prevTexture.sample(linearSampler, uv + float2( texelSize.x, 0.0f)).rgb +\n"
-"                                   prevTexture.sample(linearSampler, uv + float2(0.0f, -texelSize.y)).rgb +\n"
-"                                   prevTexture.sample(linearSampler, uv + float2(0.0f,  texelSize.y)).rgb) * 0.25f;\n"
-"    float edgeCurr = lumaCurr - aroundCurr;\n"
-"    float edgePrev = lumaPrev - aroundPrev;\n"
-"    bool shapeStays = (abs(edgeCurr) > 0.06f && abs(edgePrev) > 0.06f &&\n"
-"                       abs(edgeCurr - edgePrev) < 0.16f * max(abs(edgeCurr), abs(edgePrev)));\n"
-"    if (staticDiff < uniforms.disocclusionThreshold * 0.18f || shapeStays) {\n"
-"        float2 testStep = effMV * uniforms.timeOffsetFactor;\n"
-"        float3 wCurr = sourceTexture.sample(linearSampler, clamp(uv - testStep, float2(0.001f), float2(0.999f))).rgb;\n"
-"        float3 wPrev = prevTexture.sample(linearSampler, clamp(uv + testStep, float2(0.001f), float2(0.999f))).rgb;\n"
+"    if (staticDiff < uniforms.disocclusionThreshold * 0.14f) {\n"
+"        float2 testStep = effMV * t;\n"
+"        float3 wCurr = sourceTexture.sample(linearSampler, clamp(uv + testStep, float2(0.001f), float2(0.999f))).rgb;\n"
+"        float3 wPrev = prevTexture.sample(linearSampler, clamp(uv - testStep, float2(0.001f), float2(0.999f))).rgb;\n"
 "        float3 dWarpA = abs(wCurr - currColor.rgb);\n"
 "        float3 dWarpB = abs(wPrev - currColor.rgb);\n"
 "        float warpedDiff = max(max(dWarpA.r, max(dWarpA.g, dWarpA.b)), max(dWarpB.r, max(dWarpB.g, dWarpB.b)));\n"
-"        if (shapeStays || warpedDiff > staticDiff * 2.2f + 0.015f) {\n"
+"        if (warpedDiff > staticDiff * 2.5f + 0.018f) {\n"
 "            if (uniforms.debugTint > 0.5f) { currColor.r = min(1.0f, currColor.r * 1.25f + 0.10f); }\n"
 "            return currColor;\n"
 "        }\n"
 "    }\n"
-"    float t = uniforms.timeOffsetFactor;\n"
 "    if (edgeSpread > 0.0012f) {\n"
-"        float2 uvA = clamp(uv - effMV * t, float2(0.001f), float2(0.999f));\n"
-"        float2 uvB = clamp(uv + effMV * t, float2(0.001f), float2(0.999f));\n"
+"        float2 uvA = clamp(uv + effMV * t, float2(0.001f), float2(0.999f));\n"
+"        float2 uvB = clamp(uv - effMV * t, float2(0.001f), float2(0.999f));\n"
 "        float fitsMixed = rgb_luma_diff(sourceTexture.sample(linearSampler, uvA).rgb, prevTexture.sample(linearSampler, uvB).rgb);\n"
 "        if (fitsMixed > 0.025f) {\n"
 "            constexpr sampler pointSampler(coord::normalized, filter::nearest, address::clamp_to_edge);\n"
@@ -336,8 +324,8 @@ static NSString * const kEmbeddedMetalSource = @""
 "                for (int i = 0; i < 2; i++) {\n"
 "                    float2 blockCenterUV = (baseGrid + float2(i, j) + 0.5f) * invGrid;\n"
 "                    float2 candMV = motionVectors.sample(pointSampler, blockCenterUV).xy;\n"
-"                    float2 cUvA = clamp(uv - candMV * t, float2(0.001f), float2(0.999f));\n"
-"                    float2 cUvB = clamp(uv + candMV * t, float2(0.001f), float2(0.999f));\n"
+"                    float2 cUvA = clamp(uv + candMV * t, float2(0.001f), float2(0.999f));\n"
+"                    float2 cUvB = clamp(uv - candMV * t, float2(0.001f), float2(0.999f));\n"
 "                    float fit = rgb_luma_diff(sourceTexture.sample(linearSampler, cUvA).rgb, prevTexture.sample(linearSampler, cUvB).rgb);\n"
 "                    float nearBias = 0.025f * (i ? part.x : (1.0f - part.x)) * (j ? part.y : (1.0f - part.y));\n"
 "                    if (fit - nearBias < bestFit) { bestFit = fit - nearBias; effMV = candMV; }\n"
@@ -345,8 +333,8 @@ static NSString * const kEmbeddedMetalSource = @""
 "            }\n"
 "        }\n"
 "    }\n"
-"    float2 uvCurr = clamp(uv - effMV * t, float2(0.001f), float2(0.999f));\n"
-"    float2 uvPrev = clamp(uv + effMV * t, float2(0.001f), float2(0.999f));\n"
+"    float2 uvCurr = clamp(uv + effMV * t, float2(0.001f), float2(0.999f));\n"
+"    float2 uvPrev = clamp(uv - effMV * t, float2(0.001f), float2(0.999f));\n"
 "    float sharePrev = 0.5f;\n"
 "    float pace = length(effMV);\n"
 "    if (pace > 0.0015f) {\n"
@@ -429,10 +417,10 @@ static const MetalFGVertex kQuadVertices[6] = {
         _hasValidBaseFrame = NO;
         _inFlightGpuFrames = 0;
         _debugTintEnabled = NO;
-        _motionScale = 0.45f;
-        _disocclusionThreshold = 0.20f;
+        _motionScale = 0.50f;
+        _disocclusionThreshold = 0.18f;
         _uiSensitivity = 0.035f;
-        _motionDeadzone = 0.0004f;
+        _motionDeadzone = 0.0003f;
         
         _commandQueue = [_device newCommandQueue];
         _commandQueue.label = @"com.metalfg.warperqueue";
@@ -450,7 +438,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         }
         
         _isReady = YES;
-        NSLog(@"[MetalFG] MetalFGWarper initialized successfully for pixelFormat %lu.", (unsigned long)pixelFormat);
+        NSLog(@"[MetalFG] MetalFGWarper v2.3.0 initialized successfully for pixelFormat %lu.", (unsigned long)pixelFormat);
     }
     return self;
 }
@@ -633,7 +621,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         bmeUniforms.gridDimensions = simd_make_uint2(kGridWidth, kGridHeight);
         bmeUniforms.uiThreshold = self.uiSensitivity;
         bmeUniforms.searchRadius = 0.040f;
-        bmeUniforms.maxDisplacement = 0.035f; // Cap displacement to prevent tearing
+        bmeUniforms.maxDisplacement = 0.035f;
         bmeUniforms.pad = 0.0f;
         
         [comp setBytes:&bmeUniforms length:sizeof(bmeUniforms) atIndex:MetalFGBufferIndexBMEUniforms];
@@ -643,7 +631,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         [comp dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
         [comp endEncoding];
         
-        // Pass 3: 3x3 Spatial Median Smoothing (kills boiling shimmer)
+        // Pass 3: SMFG Outlier Removal + Fill + Bilateral Fluid Filter
         if (medianPipeline && smoothMVTexture) {
             id<MTLComputeCommandEncoder> medComp = [cmdBuffer computeCommandEncoder];
             medComp.label = @"com.metalfg.medianSmoothPass";
@@ -687,7 +675,6 @@ static const MetalFGVertex kQuadVertices[6] = {
     
     if (!sourceTex) return NO;
     
-    // Backpressure fail-safe: drop synthetic frame if GPU is backed up
     if (_inFlightGpuFrames.load() >= 2) {
         return NO;
     }
@@ -722,11 +709,13 @@ static const MetalFGVertex kQuadVertices[6] = {
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [enc endEncoding];
     
-    // Tag synthetic drawable to prevent recursive presentation hooking
     objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // Present synthetic drawable directly for the 120Hz VSYNC tick without presentation queue locking
-    [cmdBuffer presentDrawable:targetDrawable];
+    if (targetTimeHint > 0.0) {
+        [cmdBuffer presentDrawable:targetDrawable atTime:targetTimeHint];
+    } else {
+        [cmdBuffer presentDrawable:targetDrawable afterMinimumDuration:kProMotion120HzMinDuration];
+    }
     
     _inFlightGpuFrames.fetch_add(1);
     __weak MetalFGWarper *weakSelf = self;
@@ -742,7 +731,7 @@ static const MetalFGVertex kQuadVertices[6] = {
 }
 
 - (BOOL)isGpuBusy {
-    return _inFlightGpuFrames.load() >= 2;
+    return _inFlightGpuFrames.load() >= 1;
 }
 
 - (BOOL)synthesizeAndPresentWithSourceTexture:(id<MTLTexture>)sourceTexture
@@ -769,7 +758,6 @@ static const MetalFGVertex kQuadVertices[6] = {
     
     if (!destTexture) return NO;
     
-    // 1. If we don't have a valid previous frame yet, blit this frame into cache and return
     if (!hasPrevFrame || !prevTexture || !bmePipeline || !rawMVTexture || !warpPipeline) {
         id<MTLCommandBuffer> blitCmd = [_commandQueue commandBuffer];
         blitCmd.label = @"com.metalfg.initialBlit";
@@ -799,22 +787,18 @@ static const MetalFGVertex kQuadVertices[6] = {
         return NO;
     }
     
-    // 2. Backpressure guard: drop frame if GPU has >= 2 synthetic frames in flight
     if (_inFlightGpuFrames.load() >= 2) {
         return NO;
     }
     
-    // 3. Acquire synthetic drawable from the swapchain
     id<CAMetalDrawable> syntheticDrawable = [layer nextDrawable];
     if (!syntheticDrawable || !syntheticDrawable.texture) {
         return NO;
     }
     
-    // 4. Encode unified GPU command buffer: Blit -> BME -> Median -> Warp -> Present
     id<MTLCommandBuffer> cmdBuffer = [_commandQueue commandBuffer];
     cmdBuffer.label = @"com.metalfg.unifiedPipeline";
     
-    // Pass A: Copy sourceTexture into destTexture
     id<MTLBlitCommandEncoder> blit = [cmdBuffer blitCommandEncoder];
     [blit copyFromTexture:sourceTexture
               sourceSlice:0
@@ -827,7 +811,6 @@ static const MetalFGVertex kQuadVertices[6] = {
         destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
     
-    // Pass B: Hierarchical Multi-Scale BME Pass
     id<MTLComputeCommandEncoder> comp = [cmdBuffer computeCommandEncoder];
     comp.label = @"com.metalfg.bmePass";
     [comp setComputePipelineState:bmePipeline];
@@ -849,7 +832,6 @@ static const MetalFGVertex kQuadVertices[6] = {
     [comp dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     [comp endEncoding];
     
-    // Pass C: 3x3 Spatial Median Filter Pass
     id<MTLTexture> mvToUse = rawMVTexture;
     if (medianPipeline && smoothMVTexture) {
         id<MTLComputeCommandEncoder> medComp = [cmdBuffer computeCommandEncoder];
@@ -862,7 +844,6 @@ static const MetalFGVertex kQuadVertices[6] = {
         mvToUse = smoothMVTexture;
     }
     
-    // Pass D: Warp Render Pass into syntheticDrawable
     MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
     passDesc.colorAttachments[0].texture = syntheticDrawable.texture;
     passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -885,11 +866,9 @@ static const MetalFGVertex kQuadVertices[6] = {
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [enc endEncoding];
     
-    // Tag synthetic drawable to prevent recursive presentation hooking
     objc_setAssociatedObject(syntheticDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // Pass E: Present with symmetric 8.33ms minimum duration (120Hz VSYNC pace)
-    [cmdBuffer presentDrawable:syntheticDrawable afterMinimumDuration: 1.0 / 120.0];
+    [cmdBuffer presentDrawable:syntheticDrawable afterMinimumDuration:kProMotion120HzMinDuration];
     
     _inFlightGpuFrames.fetch_add(1);
     __weak MetalFGWarper *weakSelf = self;
@@ -935,7 +914,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     id<MTLCommandBuffer> cmdBuffer = [_commandQueue commandBuffer];
     cmdBuffer.label = @"com.metalfg.processAndInterpolate";
     
-    // Pass 1: Copy native frame into double-buffered cache (saving Frame N)
+    // Pass 1: Copy native frame into double-buffered cache (saving Ground Truth Frame N)
     id<MTLBlitCommandEncoder> blit = [cmdBuffer blitCommandEncoder];
     [blit copyFromTexture:sourceTexture
               sourceSlice:0
@@ -951,7 +930,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     BOOL didInterpolate = NO;
     
     if (hasPrevFrame && prevTexture && bmePipeline && rawMVTexture && warpPipeline) {
-        // Pass 2: Block Motion Estimation between Frame N-1 and Frame N
+        // Pass 2: Coarse-to-Fine Block Motion Estimation between Frame N-1 and Frame N
         id<MTLComputeCommandEncoder> comp = [cmdBuffer computeCommandEncoder];
         comp.label = @"com.metalfg.bmePass";
         [comp setComputePipelineState:bmePipeline];
@@ -986,7 +965,7 @@ static const MetalFGVertex kQuadVertices[6] = {
             mvToUse = smoothMVTexture;
         }
         
-        // Pass 3: Bidirectional Interpolation Render Pass into drawable
+        // Pass 3: True Midpoint Interpolation Render Pass (S_{N-0.5}) into drawable
         MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
         passDesc.colorAttachments[0].texture = drawable.texture;
         passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -1015,8 +994,9 @@ static const MetalFGVertex kQuadVertices[6] = {
     // Tag drawable to prevent recursive presentation hooking
     objc_setAssociatedObject(drawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // Present drawable directly (displays S_{N-0.5} if interpolated, or F_0 if first frame)
-    [cmdBuffer presentDrawable:drawable];
+    // Hardware-paced 120Hz presentation: guarantees S_{N-0.5} is held for one 120Hz refresh cycle (8.33ms)
+    // before CARenderServer latches the subsequent Ground Truth Frame N!
+    [cmdBuffer presentDrawable:drawable afterMinimumDuration:kProMotion120HzMinDuration];
     
     _inFlightGpuFrames.fetch_add(1);
     
@@ -1068,7 +1048,10 @@ static const MetalFGVertex kQuadVertices[6] = {
     [blit endEncoding];
     
     objc_setAssociatedObject(targetDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [cmdBuffer presentDrawable:targetDrawable];
+    
+    // Hardware-paced 120Hz presentation: queues Ground Truth Frame N on the very next 120Hz VSYNC tick
+    // right after S_{N-0.5}'s 8.33ms minimum duration expires!
+    [cmdBuffer presentDrawable:targetDrawable afterMinimumDuration:kProMotion120HzMinDuration];
     
     _inFlightGpuFrames.fetch_add(1);
     __weak MetalFGWarper *weakSelf = self;
