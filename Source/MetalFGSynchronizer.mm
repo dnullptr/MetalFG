@@ -63,22 +63,22 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         if (dict[@"motionScale"] != nil) {
             _motionScale = [dict[@"motionScale"] floatValue];
         } else {
-            _motionScale = 0.38f;
+            _motionScale = 0.45f;
         }
         if (dict[@"disocclusionThreshold"] != nil) {
             _disocclusionThreshold = [dict[@"disocclusionThreshold"] floatValue];
         } else {
-            _disocclusionThreshold = 0.15f;
+            _disocclusionThreshold = 0.16f;
         }
         if (dict[@"uiSensitivity"] != nil) {
             _uiSensitivity = [dict[@"uiSensitivity"] floatValue];
         } else {
-            _uiSensitivity = 0.040f;
+            _uiSensitivity = 0.036f;
         }
         if (dict[@"motionDeadzone"] != nil) {
             _motionDeadzone = [dict[@"motionDeadzone"] floatValue];
         } else {
-            _motionDeadzone = 0.0006f;
+            _motionDeadzone = 0.0004f;
         }
         if (dict[@"debugTint"] != nil) {
             _debugTint = [dict[@"debugTint"] boolValue];
@@ -87,11 +87,11 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
         }
     } else {
         _isEnabled = YES;
-        _currentPreset = 0; // Crisp
-        _motionScale = 0.38f;
-        _disocclusionThreshold = 0.15f;
-        _uiSensitivity = 0.040f;
-        _motionDeadzone = 0.0006f;
+        _currentPreset = 0; // Crisp (SMFG 1.1 default)
+        _motionScale = 0.45f;
+        _disocclusionThreshold = 0.16f;
+        _uiSensitivity = 0.036f;
+        _motionDeadzone = 0.0004f;
         _debugTint = NO;
     }
 }
@@ -115,22 +115,22 @@ static NSString * const kStandardPrefsPath = @"/var/mobile/Library/Preferences/c
 - (void)applyPreset:(NSInteger)presetIndex {
     _currentPreset = presetIndex;
     switch (presetIndex) {
-        case 0: // Crisp (Ultra-clean silhouette edges, zero ghosting, tight motion)
-            self.motionScale = 0.38f;
-            self.disocclusionThreshold = 0.15f;
-            self.uiSensitivity = 0.040f;
-            self.motionDeadzone = 0.0006f;
-            break;
-        case 1: // Balanced (Fluid 120Hz motion with tight occlusion fallback)
+        case 0: // Crisp (SMFG 1.1: Sharp Catmull-Rom read, tight edge resolve, zero ghosting)
             self.motionScale = 0.45f;
-            self.disocclusionThreshold = 0.20f;
-            self.uiSensitivity = 0.035f;
+            self.disocclusionThreshold = 0.16f;
+            self.uiSensitivity = 0.036f;
             self.motionDeadzone = 0.0004f;
             break;
-        case 2: // Ultra Smooth (Full LSFG midpoint 50% interpolation, maximum fluidity)
+        case 1: // Balanced (True 50% Midpoint + SMFG Round 53 head/silhouette occlusion guard)
             self.motionScale = 0.50f;
-            self.disocclusionThreshold = 0.24f;
-            self.uiSensitivity = 0.028f;
+            self.disocclusionThreshold = 0.20f;
+            self.uiSensitivity = 0.032f;
+            self.motionDeadzone = 0.0003f;
+            break;
+        case 2: // Ultra Smooth (Full 50% Midpoint + wide bilateral fluid motion field)
+            self.motionScale = 0.50f;
+            self.disocclusionThreshold = 0.25f;
+            self.uiSensitivity = 0.026f;
             self.motionDeadzone = 0.0002f;
             break;
         default:

@@ -7,12 +7,6 @@
         <key>Bundles</key>
         <array>
             <string>com.apple.UIKit</string>
-            <string>com.apple.Metal</string>
-        </array>
-        <key>Classes</key>
-        <array>
-            <string>CAMetalLayer</string>
-            <string>UIView</string>
         </array>
     </dict>
 </dict>

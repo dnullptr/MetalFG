@@ -277,7 +277,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 - (void)makeKeyAndVisible {
     %orig;
     NSString *className = NSStringFromClass([self class]);
-    if (![className containsString:@"MetalFGOverlay"]) {
+    if (![className containsString:@"MetalFGOverlay"] && gActiveMetalLayer != nil) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [[MetalFGOverlay sharedOverlay] show];
         });
@@ -287,25 +287,36 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
 %end
 
 // ============================================================================
-// Constructor & Safe Process Filtering
+// Constructor & Safe Process Filtering (Dopamine Userspace Reboot Safe)
 // ============================================================================
 %ctor {
     @autoreleasepool {
         const char *progname = getprogname();
         if (!progname) return;
         
-        // Strictly reject SpringBoard, system daemons, and launchd
-        if (strcmp(progname, "SpringBoard") == 0 ||
-            strcmp(progname, "backboardd") == 0 ||
-            strcmp(progname, "launchd") == 0 ||
-            strcmp(progname, "runningboardd") == 0 ||
-            strcmp(progname, "containermanagerd") == 0 ||
-            strcmp(progname, "wifid") == 0 ||
-            strcmp(progname, "mediaserverd") == 0) {
+        // Verify executable path via dyld first
+        char execPath[1024];
+        uint32_t size = sizeof(execPath);
+        if (_NSGetExecutablePath(execPath, &size) != 0) {
             return;
         }
         
-        // Reject jailbreak managers and package managers
+        // POSITIVE WHITELIST: Strictly require user/AppStore/TrollStore app bundle path!
+        // On iOS 15/16, all third-party games reside in /var/containers/Bundle/Application/<UUID>/<App>.app/
+        // System daemons (backboardd, SpringBoard, PreBoard, launchd, CARenderServer) and jailbreak utilities
+        // NEVER reside in /var/containers/Bundle/Application/, preventing any userspace reboot freeze.
+        if (strstr(execPath, "/var/containers/Bundle/Application/") == NULL) {
+            return;
+        }
+        
+        // Strictly ensure this binary is inside a main .app bundle and NOT an app extension (.appex) or XPC service
+        if (strstr(execPath, ".app/") == NULL ||
+            strstr(execPath, ".appex/") != NULL ||
+            strstr(execPath, ".xpc/") != NULL) {
+            return;
+        }
+        
+        // Reject known non-game utilities & package managers even if installed in user containers
         if (strcmp(progname, "Sileo") == 0 ||
             strcmp(progname, "Zebra") == 0 ||
             strcmp(progname, "Dopamine") == 0 ||
@@ -314,76 +325,43 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
             return;
         }
         
-        // Verify executable path via dyld
-        char execPath[1024];
-        uint32_t size = sizeof(execPath);
-        if (_NSGetExecutablePath(execPath, &size) != 0) {
-            return;
-        }
-        
-        // Strictly ensure this binary is inside an .app bundle
-        if (strstr(execPath, ".app/") == NULL && strstr(execPath, ".app") == NULL) {
-            return;
-        }
-        
-        // Strictly reject binaries in system directories
-        if (strncmp(execPath, "/System/", 8) == 0 ||
-            strncmp(execPath, "/Library/", 9) == 0 ||
-            strncmp(execPath, "/usr/", 5) == 0) {
-            return;
-        }
-        
         // Check CFBundleIdentifier if available at constructor time
         CFBundleRef mainBundle = CFBundleGetMainBundle();
         if (mainBundle) {
             CFStringRef cfBundleId = CFBundleGetIdentifier(mainBundle);
-            if (cfBundleId && CFStringHasPrefix(cfBundleId, CFSTR("com.apple."))) {
-                return;
+            if (cfBundleId) {
+                if (CFStringHasPrefix(cfBundleId, CFSTR("com.apple.")) ||
+                    CFStringHasPrefix(cfBundleId, CFSTR("com.opa334.")) ||
+                    CFStringHasPrefix(cfBundleId, CFSTR("org.coolstar."))) {
+                    return;
+                }
             }
         }
         
         NSLog(@"==================================================");
-        NSLog(@"[MetalFG] Initializing MetalFG (Motion-Interpolated FG) for target: %s (%s)", progname, execPath);
+        NSLog(@"[MetalFG] Initializing MetalFG v2.2.0 (SMFG 1.1 Engine) for target: %s (%s)", progname, execPath);
         NSLog(@"==================================================");
         
-        // Initialize Logos hooks strictly for this game process
+        // Initialize Logos hooks strictly for this app process
         %init;
         
-        // Immediately schedule HUD overlay display on the main queue
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[MetalFGOverlay sharedOverlay] show];
-        });
-        
-        // Ensure overlay is shown when application becomes active or scene activates
+        // Ensure overlay is shown when application becomes active or scene activates (only if a game Metal layer is active)
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(NSNotification * _Nonnull note) {
-            [[MetalFGOverlay sharedOverlay] show];
+            if (gActiveMetalLayer != nil) {
+                [[MetalFGOverlay sharedOverlay] show];
+            }
         }];
         
         [[NSNotificationCenter defaultCenter] addObserverForName:UISceneDidActivateNotification
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(NSNotification * _Nonnull note) {
-            [[MetalFGOverlay sharedOverlay] show];
+            if (gActiveMetalLayer != nil) {
+                [[MetalFGOverlay sharedOverlay] show];
+            }
         }];
-        
-        // Load preferences
-        NSString *prefPath = @"/var/jb/var/mobile/Library/Preferences/com.dnullptr.metalfg.plist";
-        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:prefPath];
-        if (!prefs) {
-            prefs = [NSDictionary dictionaryWithContentsOfFile:@"/var/jb/var/mobile/Library/Preferences/com.metalfg.prefs.plist"];
-        }
-        if (prefs) {
-            NSNumber *enabledNum = prefs[@"enabled"];
-            if (enabledNum) {
-                [MetalFGSynchronizer sharedSynchronizer].isEnabled = [enabledNum boolValue];
-            }
-            NSNumber *debugNum = prefs[@"debugTint"];
-            if (debugNum) {
-                [MetalFGSynchronizer sharedSynchronizer].debugTint = [debugNum boolValue];
-            }
-        }
     }
 }
