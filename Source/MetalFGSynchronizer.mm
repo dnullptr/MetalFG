@@ -305,18 +305,15 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
     
     os_unfair_lock_lock(&_syncLock);
     CFTimeInterval interval = now - _lastNativeFrameTime;
-    BOOL isIrregular = NO;
+    BOOL isMajorStall = (interval > 0.125); // Only reset across true >125ms pauses/loading hitches
     if (interval > 0.005 && interval < 0.200) {
         CFTimeInterval irregularThreshold = MAX(2.5 * _smoothedNativeInterval, _smoothedNativeInterval + 0.025);
         if (_smoothedNativeInterval > 0.005 && interval > irregularThreshold) {
-            isIrregular = YES;
             // SMFG 1.3: Update EMA slowly on hitches/stutters (lf_fg_pace.inl)
             _smoothedNativeInterval = _smoothedNativeInterval * 0.96 + interval * 0.04;
         } else {
             _smoothedNativeInterval = _smoothedNativeInterval * 0.85 + interval * 0.15;
         }
-    } else if (interval >= 0.200) {
-        isIrregular = YES;
     }
     _lastNativeFrameTime = now;
     _nativeFrameCount++;
@@ -328,9 +325,9 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
     os_unfair_lock_unlock(&_syncLock);
     
     if (enabled && currentWarper) {
-        // SMFG 1.3 Irregular Hitch Guard: Reset frame history across stutters/loading spikes
-        // to prevent synthetic burst distortion across sudden long frame spans
-        if (isIrregular) {
+        // SMFG 1.3 Major Stall Guard: Reset frame history only across true >125ms pauses/scene cuts
+        // so normal 25-60 FPS gameplay never drops a single synthetic frame
+        if (isMajorStall) {
             [currentWarper resetFrameHistory];
         }
         // Option 3: Full 1-Frame Latency True Interpolation Model (LSFG / DLSS 3)

@@ -36,18 +36,19 @@ inline float eval_candidate_patch(texture2d<float, access::sample> prevTexture,
                                   float3 patchMeanCurr,
                                   float2 candidate) {
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-    float3 rgbPrev[9];
+    half3 rgbPrev[9];
     float3 patchMeanPrev = float3(0.0f);
     for (int i = 0; i < 9; i++) {
-        rgbPrev[i] = prevTexture.sample(s, uvsCurr[i] - candidate).rgb;
-        patchMeanPrev += rgbPrev[i];
+        float3 samplePrev = prevTexture.sample(s, uvsCurr[i] - candidate).rgb;
+        rgbPrev[i] = half3(samplePrev);
+        patchMeanPrev += samplePrev;
     }
     patchMeanPrev *= (1.0f / 9.0f);
     
     float3 meanShift = (patchMeanCurr - patchMeanPrev) * 0.75f;
     float error = 0.0f;
     for (int i = 0; i < 9; i++) {
-        error += min(rgb_luma_diff(rgbCurr[i] - meanShift, rgbPrev[i]), 0.25f);
+        error += min(rgb_luma_diff(rgbCurr[i] - meanShift, float3(rgbPrev[i])), 0.25f);
     }
     return error * (1.0f / 9.0f) + 0.20f * min(rgb_luma_diff(patchMeanCurr, patchMeanPrev), 0.25f);
 }
@@ -183,7 +184,8 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     float2 temporalPrior = prevMotionVectors.read(gid).xy;
     if (dot(temporalPrior, temporalPrior) > 1e-6f) {
         float errTemp = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, temporalPrior);
-        float costTemp = errTemp + kMargin * 0.45f;
+        float distTemp = isHUDZone ? length(temporalPrior) : (0.35f * length(temporalPrior - prior));
+        float costTemp = errTemp + kMargin * 0.5f + kDistPenalty * distTemp;
         if (costTemp < bestCost) {
             bestCost = costTemp;
             bestError = errTemp;
@@ -435,9 +437,10 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     }
     
     // SMFG 1.3 Bidirectional Sub-Pixel Agreement:
-    // When forward and backward motion vectors agree closely, average them to halve sub-pixel jitter
-    if (distance(mvFwd, mvBack) < 0.0015f && dot(mvFwd, mvBack) > 0.0f) {
-        effMV = (mvFwd + mvBack) * 0.5f;
+    // Only when center, forward, and backward vectors ALL agree within 1 texel (uniformly moving surface),
+    // average them to cut sub-pixel quantization jitter without ever overriding foreground silhouettes.
+    if (distance(mvFwd, mv) < 0.0012f && distance(mvBack, mv) < 0.0012f) {
+        effMV = 0.5f * mv + 0.25f * (mvFwd + mvBack);
     }
     
     float mvMag = length(effMV);
