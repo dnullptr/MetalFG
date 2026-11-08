@@ -12,6 +12,100 @@ static const uint32_t kGridHeight = 45;
 // 120Hz ProMotion minimum frame duration (8.33ms minus 0.5ms VSYNC clock jitter tolerance)
 static const CFTimeInterval kProMotion120HzMinDuration = (1.0 / 120.0) - 0.0005;
 
+// ============================================================================
+// Display Pacing Diagnostics
+// Measures how long each presented frame actually stayed on screen, using the
+// compositor's presentedTime. True 120Hz = every hold lands in the ~8.3ms bucket.
+// ============================================================================
+typedef NS_ENUM(int, MFGPresentKind) {
+    MFGPresentKindSynthetic = 0,
+    MFGPresentKindNative = 1,
+};
+
+enum { kMFGHoldBuckets = 5 }; // <6ms | ~8.3ms | ~12.5ms | ~16.7ms | >20ms
+
+struct MFGPacingStats {
+    CFTimeInterval lastPresentedTime;
+    int lastKind;
+    CFTimeInterval windowStart;
+    uint32_t holds[2][kMFGHoldBuckets];
+    uint32_t dropped[2];
+    uint32_t orderBreaks;   // Same kind displayed twice in a row (S,S or N,N)
+    uint32_t lateCallbacks; // presentedTime went backwards (callback reordering)
+    uint32_t presented;
+    double maxHoldMs;
+};
+
+static os_unfair_lock gPacingLock = OS_UNFAIR_LOCK_INIT;
+static MFGPacingStats gPacing = { 0.0, -1, 0.0, {{0}}, {0}, 0, 0, 0, 0.0 };
+
+static inline int MFGHoldBucket(double ms) {
+    if (ms < 6.0) return 0;
+    if (ms < 11.0) return 1;
+    if (ms < 14.5) return 2;
+    if (ms < 20.0) return 3;
+    return 4;
+}
+
+static void MFGRecordPresentation(CFTimeInterval presentedTime, MFGPresentKind kind) {
+    MFGPacingStats snap = {};
+    BOOL shouldLog = NO;
+
+    os_unfair_lock_lock(&gPacingLock);
+    if (presentedTime <= 0.0) {
+        gPacing.dropped[kind]++;
+    } else if (presentedTime < gPacing.lastPresentedTime) {
+        gPacing.lateCallbacks++;
+    } else {
+        if (gPacing.lastKind >= 0) {
+            double holdMs = (presentedTime - gPacing.lastPresentedTime) * 1000.0;
+            // Ignore loading screens / backgrounding so they don't pollute the histogram
+            if (holdMs < 100.0) {
+                gPacing.holds[gPacing.lastKind][MFGHoldBucket(holdMs)]++;
+                if (holdMs > gPacing.maxHoldMs) gPacing.maxHoldMs = holdMs;
+            }
+            if (gPacing.lastKind == kind) gPacing.orderBreaks++;
+        }
+        gPacing.lastPresentedTime = presentedTime;
+        gPacing.lastKind = kind;
+        gPacing.presented++;
+    }
+
+    CFTimeInterval now = CACurrentMediaTime();
+    if (gPacing.windowStart <= 0.0) gPacing.windowStart = now;
+    if (now - gPacing.windowStart >= 1.0) {
+        snap = gPacing;
+        shouldLog = YES;
+        memset(gPacing.holds, 0, sizeof(gPacing.holds));
+        memset(gPacing.dropped, 0, sizeof(gPacing.dropped));
+        gPacing.orderBreaks = 0;
+        gPacing.lateCallbacks = 0;
+        gPacing.presented = 0;
+        gPacing.maxHoldMs = 0.0;
+        gPacing.windowStart = now;
+    }
+    os_unfair_lock_unlock(&gPacingLock);
+
+    if (shouldLog) {
+        const uint32_t *s = snap.holds[MFGPresentKindSynthetic];
+        const uint32_t *n = snap.holds[MFGPresentKindNative];
+        NSLog(@"[MetalFG][Pacing] shown=%u | S hold <6:%u 8.3:%u 12.5:%u 16.7:%u >20:%u | N hold <6:%u 8.3:%u 12.5:%u 16.7:%u >20:%u | dropped S=%u N=%u | orderBreaks=%u lateCb=%u | maxHold=%.1fms",
+              snap.presented,
+              s[0], s[1], s[2], s[3], s[4],
+              n[0], n[1], n[2], n[3], n[4],
+              snap.dropped[MFGPresentKindSynthetic], snap.dropped[MFGPresentKindNative],
+              snap.orderBreaks, snap.lateCallbacks, snap.maxHoldMs);
+    }
+}
+
+// Must be called before the drawable is presented.
+static inline void MFGTrackPresentation(id<CAMetalDrawable> drawable, MFGPresentKind kind) {
+    if (![drawable respondsToSelector:@selector(addPresentedHandler:)]) return;
+    [drawable addPresentedHandler:^(id<MTLDrawable> d) {
+        MFGRecordPresentation(d.presentedTime, kind);
+    }];
+}
+
 // Embedded fallback Metal Shading Language source (SMFG 1.3 Super-Motion Engine v2.4.0)
 static NSString * const kEmbeddedMetalSource = @""
 "#include <metal_stdlib>\n"
@@ -1021,6 +1115,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     
     // Hardware-paced 120Hz presentation: guarantees S_{N-0.5} is held for one 120Hz refresh cycle (8.33ms)
     // before CARenderServer latches the subsequent Ground Truth Frame N!
+    MFGTrackPresentation(drawable, didInterpolate ? MFGPresentKindSynthetic : MFGPresentKindNative);
     [cmdBuffer presentDrawable:drawable afterMinimumDuration:kProMotion120HzMinDuration];
     
     _inFlightGpuFrames.fetch_add(1);
@@ -1076,6 +1171,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     
     // Hardware-paced 120Hz presentation: queues Ground Truth Frame N on the very next 120Hz VSYNC tick
     // right after S_{N-0.5}'s 8.33ms minimum duration expires!
+    MFGTrackPresentation(targetDrawable, MFGPresentKindNative);
     [cmdBuffer presentDrawable:targetDrawable afterMinimumDuration:kProMotion120HzMinDuration];
     
     _inFlightGpuFrames.fetch_add(1);
