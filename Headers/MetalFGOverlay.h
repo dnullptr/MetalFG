@@ -13,6 +13,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)updateWithNativeFPS:(double)nativeFps
                syntheticFPS:(double)syntheticFps;
 
+// Update per-second display pacing stats (on-screen holds of ~8.3ms vs any other duration)
+- (void)updatePacingWithSyntheticOnTime:(unsigned)sOnTime
+                          syntheticLate:(unsigned)sLate
+                           nativeOnTime:(unsigned)nOnTime
+                             nativeLate:(unsigned)nLate
+                                dropped:(unsigned)dropped
+                            orderBreaks:(unsigned)orderBreaks;
+
 // Open/close the live tuning panel
 - (void)toggleTuningPanel;
 

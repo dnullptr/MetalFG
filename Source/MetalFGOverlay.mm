@@ -421,6 +421,7 @@
     UIView *_pillView;
     UIView *_statusDot;
     UILabel *_fpsLabel;
+    UILabel *_pacingLabel;
     UIButton *_gearButton;
     BOOL _isMinimized;
     MetalFGOverlayWindow *_overlayWindow;
@@ -435,7 +436,7 @@
     static MetalFGOverlay *sOverlay = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        sOverlay = [[MetalFGOverlay alloc] initWithFrame:CGRectMake(50, 40, 224, 36)];
+        sOverlay = [[MetalFGOverlay alloc] initWithFrame:CGRectMake(50, 40, 224, 52)];
     });
     return sOverlay;
 }
@@ -464,12 +465,20 @@
         [_pillView addSubview:_statusDot];
         
         // FPS text label
-        _fpsLabel = [[UILabel alloc] initWithFrame:CGRectMake(26, 0, 158, 36)];
+        _fpsLabel = [[UILabel alloc] initWithFrame:CGRectMake(26, 2, 158, 30)];
         _fpsLabel.textColor = [UIColor whiteColor];
         _fpsLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightBold];
         _fpsLabel.text = @"⚡ MetalFG: Ready";
         _fpsLabel.adjustsFontSizeToFitWidth = YES;
         [_pillView addSubview:_fpsLabel];
+        
+        // Display pacing line: ✓ = held ~8.3ms (one 120Hz refresh), ✗ = any other hold duration
+        _pacingLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 32, 200, 16)];
+        _pacingLabel.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
+        _pacingLabel.font = [UIFont monospacedDigitSystemFontOfSize:9.5 weight:UIFontWeightSemibold];
+        _pacingLabel.text = @"Pacing: waiting…";
+        _pacingLabel.adjustsFontSizeToFitWidth = YES;
+        [_pillView addSubview:_pacingLabel];
         
         // Gear Button (⚙️) for instant one-tap access to live tuning panel
         _gearButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -552,13 +561,15 @@
             self->_pillView.layer.cornerRadius = 18.0;
             self->_statusDot.center = CGPointMake(18, 18);
             self->_fpsLabel.alpha = 0.0;
+            self->_pacingLabel.alpha = 0.0;
             self->_gearButton.alpha = 0.0;
         } else {
-            self.bounds = CGRectMake(0, 0, 224, 36);
+            self.bounds = CGRectMake(0, 0, 224, 52);
             self->_pillView.frame = self.bounds;
             self->_pillView.layer.cornerRadius = 18.0;
             self->_statusDot.frame = CGRectMake(10, 13, 10, 10);
             self->_fpsLabel.alpha = 1.0;
+            self->_pacingLabel.alpha = 1.0;
             self->_gearButton.alpha = 1.0;
         }
     }];
@@ -663,7 +674,7 @@
             [vc.view addSubview:self];
             
             // Set initial position: top-left with safe padding
-            self.frame = CGRectMake(50, 40, 224, 36);
+            self.frame = CGRectMake(50, 40, 224, 52);
         } else {
             if (activeScene && self->_overlayWindow.windowScene != activeScene) {
                 self->_overlayWindow.windowScene = activeScene;
@@ -688,6 +699,8 @@
         if (!sync.isEnabled) {
             // Frame Generation is toggled OFF
             self->_fpsLabel.text = [NSString stringWithFormat:@"⏸ FG: OFF (Native: %.0f)", nativeFps];
+            self->_pacingLabel.text = @"Pacing: — (FG off)";
+            self->_pacingLabel.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
             self->_statusDot.backgroundColor = [UIColor colorWithRed:0.65 green:0.65 blue:0.65 alpha:1.0];
             self->_pillView.layer.borderColor = [UIColor colorWithRed:0.55 green:0.55 blue:0.55 alpha:0.7].CGColor;
             return;
@@ -719,6 +732,23 @@
             self->_statusDot.backgroundColor = [UIColor colorWithRed:0.30 green:0.75 blue:1.0 alpha:1.0];
             self->_pillView.layer.borderColor = [UIColor colorWithRed:0.30 green:0.75 blue:1.0 alpha:0.7].CGColor;
         }
+    });
+}
+
+- (void)updatePacingWithSyntheticOnTime:(unsigned)sOnTime
+                          syntheticLate:(unsigned)sLate
+                           nativeOnTime:(unsigned)nOnTime
+                             nativeLate:(unsigned)nLate
+                                dropped:(unsigned)dropped
+                            orderBreaks:(unsigned)orderBreaks {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (![MetalFGSynchronizer sharedSynchronizer].isEnabled) return;
+        self->_pacingLabel.text = [NSString stringWithFormat:@"S %u✓ %u✗ │ N %u✓ %u✗ │ drop %u │ ord %u",
+                                   sOnTime, sLate, nOnTime, nLate, dropped, orderBreaks];
+        BOOL clean = (sLate + nLate + dropped + orderBreaks) <= 1;
+        self->_pacingLabel.textColor = clean
+            ? [UIColor colorWithRed:0.35 green:0.95 blue:0.55 alpha:1.0]
+            : [UIColor colorWithRed:1.0 green:0.70 blue:0.25 alpha:1.0];
     });
 }
 

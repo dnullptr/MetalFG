@@ -1,5 +1,6 @@
 #import "../Headers/MetalFGWarper.h"
 #import "../Headers/TouchTracker.h"
+#import "../Headers/MetalFGOverlay.h"
 #import <os/lock.h>
 #import <objc/runtime.h>
 #import <atomic>
@@ -95,6 +96,12 @@ static void MFGRecordPresentation(CFTimeInterval presentedTime, MFGPresentKind k
               n[0], n[1], n[2], n[3], n[4],
               snap.dropped[MFGPresentKindSynthetic], snap.dropped[MFGPresentKindNative],
               snap.orderBreaks, snap.lateCallbacks, snap.maxHoldMs);
+        [[MetalFGOverlay sharedOverlay] updatePacingWithSyntheticOnTime:s[1]
+                                                          syntheticLate:s[0] + s[2] + s[3] + s[4]
+                                                           nativeOnTime:n[1]
+                                                             nativeLate:n[0] + n[2] + n[3] + n[4]
+                                                                dropped:snap.dropped[0] + snap.dropped[1]
+                                                            orderBreaks:snap.orderBreaks];
     }
 }
 
