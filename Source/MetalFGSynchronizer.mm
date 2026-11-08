@@ -19,8 +19,10 @@
     
     BOOL _isBackgrounded;
     BOOL _hasInjectedForCurrentNativeFrame;
-    BOOL _hasPendingNativePresent;
     CFTimeInterval _smoothedNativeInterval;
+    
+    // Serial queue that presents Ground Truth Frame N right behind S_{N-0.5}
+    dispatch_queue_t _presentQueue;
 }
 
 @end
@@ -176,7 +178,8 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
         _shouldStopThread = NO;
         _isBackgrounded = NO;
         _hasInjectedForCurrentNativeFrame = NO;
-        _hasPendingNativePresent = NO;
+        _presentQueue = dispatch_queue_create("com.metalfg.nativePresent",
+                                              dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
         _smoothedNativeInterval = 1.0 / 60.0;
         _nativeFrameCount = 0;
         _syntheticFrameCount = 0;
@@ -205,7 +208,6 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
 - (void)handleAppDidEnterBackground {
     os_unfair_lock_lock(&_syncLock);
     _isBackgrounded = YES;
-    _hasPendingNativePresent = NO;
     if (_displayLink) {
         _displayLink.paused = YES;
     }
@@ -334,19 +336,41 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
         // 1. Warper saves Ground Truth Frame N into double-buffered cache.
         // 2. Warper computes coarse-to-fine motion field between Frame N-1 and Frame N.
         // 3. Warper synthesizes S_{N-0.5} into the native drawable and presents it with
-        //    afterMinimumDuration:(1/120 - 0.0005) (latches on VSYNC Tick 2k for 8.33ms).
-        BOOL didInterpolate = [currentWarper processAndInterpolateNativeDrawable:drawable];
+        //    afterMinimumDuration:(1/120 - 0.0005).
+        // 4. Ground Truth Frame N is presented immediately afterwards (no display-link polling);
+        //    afterMinimumDuration keeps S_{N-0.5} on screen for a full 120Hz refresh first.
+        uint64_t frameSerial = 0;
+        BOOL didInterpolate = [currentWarper processAndInterpolateNativeDrawable:drawable frameSerial:&frameSerial];
         
-        os_unfair_lock_lock(&_syncLock);
         if (didInterpolate) {
+            os_unfair_lock_lock(&_syncLock);
             _syntheticFrameCount++;
-            _hasPendingNativePresent = YES;
-        } else {
-            // First frame after startup/toggle: Frame 0 was presented directly as F_0
-            _hasPendingNativePresent = NO;
+            os_unfair_lock_unlock(&_syncLock);
+            
+            dispatch_async(_presentQueue, ^{
+                [self presentNativeFrameWithSerial:frameSerial warper:currentWarper];
+            });
         }
-        os_unfair_lock_unlock(&_syncLock);
     }
+}
+
+- (void)presentNativeFrameWithSerial:(uint64_t)serial warper:(MetalFGWarper *)warper {
+    if (_isBackgrounded || !_isEnabled) return;
+    
+    os_unfair_lock_lock(&_syncLock);
+    CAMetalLayer *layer = _activeLayer;
+    os_unfair_lock_unlock(&_syncLock);
+    if (!layer) return;
+    
+    CGSize drawableSize = layer.drawableSize;
+    if (drawableSize.width < 250.0 || drawableSize.height < 150.0) return;
+    
+    id<CAMetalDrawable> nativeDrawable = [layer nextDrawable];
+    if (!nativeDrawable || !nativeDrawable.texture) return;
+    
+    // Returns NO if S_{N+0.5} was already committed while we waited for a drawable;
+    // showing Frame N after it would step backwards, so it is skipped instead.
+    [warper presentCachedNativeFrameWithSerial:serial toDrawable:nativeDrawable];
 }
 
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture
@@ -404,37 +428,8 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
             NSLog(@"[MetalFG] Performance: Native: %.1f FPS | Synthetic: %.1f FPS | Total: %.1f FPS",
                   nativeFps, syntheticFps, nativeFps + syntheticFps);
         }
-        
-        if (!_isEnabled) return;
-        
-        os_unfair_lock_lock(&_syncLock);
-        BOOL pendingNative = _hasPendingNativePresent;
-        CAMetalLayer *layer = _activeLayer;
-        MetalFGWarper *warper = _warper;
-        os_unfair_lock_unlock(&_syncLock);
-        
-        if (!pendingNative || !layer || !warper || !warper.isReady) return;
-        
-        // Ignore HUD/sub-layers smaller than 250x150
-        CGSize drawableSize = layer.drawableSize;
-        if (drawableSize.width < 250.0 || drawableSize.height < 150.0) return;
-        
-        // Wait only until S_{N-0.5} has finished rendering on the GPU (typically ~0.6ms).
-        // Because S_{N-0.5} was presented with afterMinimumDuration:(1/120 - 0.0005),
-        // CARenderServer guarantees S_{N-0.5} stays visible for a full 8.33ms 120Hz cycle
-        // and automatically latches Ground Truth Frame N on the very next 120Hz VSYNC tick!
-        if ([warper isGpuBusy]) return;
-        
-        id<CAMetalDrawable> nativeDrawable = [layer nextDrawable];
-        if (!nativeDrawable || !nativeDrawable.texture) return;
-        
-        // Present cached Ground Truth Frame N onto the display for the second 120Hz refresh cycle
-        BOOL presented = [warper presentCachedNativeFrameToDrawable:nativeDrawable];
-        if (presented) {
-            os_unfair_lock_lock(&_syncLock);
-            _hasPendingNativePresent = NO;
-            os_unfair_lock_unlock(&_syncLock);
-        }
+        // Ground Truth Frame N is now presented from _presentQueue right after S_{N-0.5};
+        // this tick only drives stats and keeps the 120Hz ProMotion range requested.
     }
 }
 

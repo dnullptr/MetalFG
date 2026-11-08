@@ -517,6 +517,10 @@ static const MetalFGVertex kQuadVertices[6] = {
     BOOL _hasValidBaseFrame;
     os_unfair_lock _textureLock;
     
+    // Serializes S/N command-buffer commits so presentation order always matches commit order
+    os_unfair_lock _presentLock;
+    uint64_t _frameSerial; // Guarded by _textureLock; identifies the cached Ground Truth frame
+    
     std::atomic<int> _inFlightGpuFrames;
 }
 
@@ -535,6 +539,8 @@ static const MetalFGVertex kQuadVertices[6] = {
         _device = device;
         _pixelFormat = pixelFormat;
         _textureLock = OS_UNFAIR_LOCK_INIT;
+        _presentLock = OS_UNFAIR_LOCK_INIT;
+        _frameSerial = 0;
         _activeReadIndex = 0;
         _activeWriteIndex = 1;
         _hasValidBaseFrame = NO;
@@ -1014,6 +1020,11 @@ static const MetalFGVertex kQuadVertices[6] = {
 }
 
 - (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable {
+    return [self processAndInterpolateNativeDrawable:drawable frameSerial:NULL];
+}
+
+- (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable frameSerial:(uint64_t *)outSerial {
+    if (outSerial) *outSerial = 0;
     if (!drawable || !_isReady) return NO;
     id<MTLTexture> sourceTexture = drawable.texture;
     if (!sourceTexture || sourceTexture.width < 250 || sourceTexture.height < 150) return NO;
@@ -1035,6 +1046,8 @@ static const MetalFGVertex kQuadVertices[6] = {
     os_unfair_lock_unlock(&_textureLock);
     
     if (!destTexture) return NO;
+    
+    os_unfair_lock_lock(&_presentLock);
     
     id<MTLCommandBuffer> cmdBuffer = [_commandQueue commandBuffer];
     cmdBuffer.label = @"com.metalfg.processAndInterpolate";
@@ -1132,7 +1145,9 @@ static const MetalFGVertex kQuadVertices[6] = {
     _activeReadIndex = writeIdx;
     _activeWriteIndex = (writeIdx == 0 ? 1 : 0);
     _hasValidBaseFrame = YES;
+    uint64_t serial = ++_frameSerial;
     os_unfair_lock_unlock(&_textureLock);
+    if (outSerial) *outSerial = serial;
     
     __weak MetalFGWarper *weakSelf = self;
     [cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
@@ -1143,21 +1158,35 @@ static const MetalFGVertex kQuadVertices[6] = {
     }];
     
     [cmdBuffer commit];
+    os_unfair_lock_unlock(&_presentLock);
     return didInterpolate;
 }
 
 - (BOOL)presentCachedNativeFrameToDrawable:(id<CAMetalDrawable>)targetDrawable {
+    return [self presentCachedNativeFrameWithSerial:0 toDrawable:targetDrawable];
+}
+
+- (BOOL)presentCachedNativeFrameWithSerial:(uint64_t)serial toDrawable:(id<CAMetalDrawable>)targetDrawable {
     if (!targetDrawable || !_isReady) return NO;
     
+    // Held across the commit so a newer S_{N+0.5} can never be committed between our
+    // freshness check and our present (which would display Ground Truth N after it).
+    os_unfair_lock_lock(&_presentLock);
+    
     os_unfair_lock_lock(&_textureLock);
-    if (!_hasValidBaseFrame) {
+    BOOL stale = (serial != 0 && serial != _frameSerial);
+    if (!_hasValidBaseFrame || stale) {
         os_unfair_lock_unlock(&_textureLock);
+        os_unfair_lock_unlock(&_presentLock);
         return NO;
     }
     id<MTLTexture> nativeTex = _cachedTextures[_activeReadIndex];
     os_unfair_lock_unlock(&_textureLock);
     
-    if (!nativeTex) return NO;
+    if (!nativeTex) {
+        os_unfair_lock_unlock(&_presentLock);
+        return NO;
+    }
     
     id<MTLCommandBuffer> cmdBuffer = [_commandQueue commandBuffer];
     cmdBuffer.label = @"com.metalfg.presentCachedNative";
@@ -1191,6 +1220,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     }];
     
     [cmdBuffer commit];
+    os_unfair_lock_unlock(&_presentLock);
     return YES;
 }
 

@@ -49,6 +49,11 @@ extern const char kMetalFGIsSyntheticKey;
 - (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable;
 - (BOOL)presentCachedNativeFrameToDrawable:(id<CAMetalDrawable>)targetDrawable;
 
+// Same as above, but report/require the serial of the cached Ground Truth frame.
+// presentCachedNativeFrameWithSerial: returns NO (presents nothing) if a newer frame has been processed.
+- (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable frameSerial:(nullable uint64_t *)outSerial;
+- (BOOL)presentCachedNativeFrameWithSerial:(uint64_t)serial toDrawable:(id<CAMetalDrawable>)targetDrawable;
+
 // Reset history (e.g. after irregular stall/hitch)
 - (void)resetFrameHistory;
 
