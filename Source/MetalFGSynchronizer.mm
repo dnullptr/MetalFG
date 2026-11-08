@@ -355,22 +355,27 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
 }
 
 - (void)presentNativeFrameWithSerial:(uint64_t)serial warper:(MetalFGWarper *)warper {
-    if (_isBackgrounded || !_isEnabled) return;
-    
-    os_unfair_lock_lock(&_syncLock);
-    CAMetalLayer *layer = _activeLayer;
-    os_unfair_lock_unlock(&_syncLock);
-    if (!layer) return;
-    
-    CGSize drawableSize = layer.drawableSize;
-    if (drawableSize.width < 250.0 || drawableSize.height < 150.0) return;
-    
-    id<CAMetalDrawable> nativeDrawable = [layer nextDrawable];
-    if (!nativeDrawable || !nativeDrawable.texture) return;
-    
-    // Returns NO if S_{N+0.5} was already committed while we waited for a drawable;
-    // showing Frame N after it would step backwards, so it is skipped instead.
-    [warper presentCachedNativeFrameWithSerial:serial toDrawable:nativeDrawable];
+    // nextDrawable returns an autoreleased drawable. GCD drains its pools at undefined times,
+    // so without a local pool the drawable is never returned to the layer's 3-slot swapchain
+    // and the game's own nextDrawable starves (1s allowsNextDrawableTimeout hangs).
+    @autoreleasepool {
+        if (_isBackgrounded || !_isEnabled) return;
+        
+        os_unfair_lock_lock(&_syncLock);
+        CAMetalLayer *layer = _activeLayer;
+        os_unfair_lock_unlock(&_syncLock);
+        if (!layer) return;
+        
+        CGSize drawableSize = layer.drawableSize;
+        if (drawableSize.width < 250.0 || drawableSize.height < 150.0) return;
+        
+        id<CAMetalDrawable> nativeDrawable = [layer nextDrawable];
+        if (!nativeDrawable || !nativeDrawable.texture) return;
+        
+        // Returns NO if S_{N+0.5} was already committed while we waited for a drawable;
+        // showing Frame N after it would step backwards, so it is skipped instead.
+        [warper presentCachedNativeFrameWithSerial:serial toDrawable:nativeDrawable];
+    }
 }
 
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture
