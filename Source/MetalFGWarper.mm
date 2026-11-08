@@ -1025,9 +1025,23 @@ static const MetalFGVertex kQuadVertices[6] = {
 
 - (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable frameSerial:(uint64_t *)outSerial {
     if (outSerial) *outSerial = 0;
+    if (!drawable) return NO;
+    return [self processSourceTexture:drawable.texture outputDrawable:drawable frameSerial:outSerial];
+}
+
+- (BOOL)processSourceTexture:(id<MTLTexture>)sourceTexture
+              outputDrawable:(id<CAMetalDrawable>)drawable
+                 frameSerial:(uint64_t *)outSerial {
+    if (outSerial) *outSerial = 0;
     if (!drawable || !_isReady) return NO;
-    id<MTLTexture> sourceTexture = drawable.texture;
     if (!sourceTexture || sourceTexture.width < 250 || sourceTexture.height < 150) return NO;
+    id<MTLTexture> outputTexture = drawable.texture;
+    if (!outputTexture ||
+        outputTexture.width != sourceTexture.width ||
+        outputTexture.height != sourceTexture.height ||
+        outputTexture.pixelFormat != sourceTexture.pixelFormat) {
+        return NO;
+    }
     
     [self ensureTextureStorageForSource:sourceTexture];
     
@@ -1106,7 +1120,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         
         // Pass 3: True Midpoint Interpolation Render Pass (S_{N-0.5}) into drawable
         MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
-        passDesc.colorAttachments[0].texture = drawable.texture;
+        passDesc.colorAttachments[0].texture = outputTexture;
         passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
         
@@ -1128,6 +1142,21 @@ static const MetalFGVertex kQuadVertices[6] = {
         [enc endEncoding];
         
         didInterpolate = YES;
+    }
+    
+    // No previous frame yet: show Ground Truth directly when rendering into a separate output layer
+    if (!didInterpolate && outputTexture != sourceTexture) {
+        id<MTLBlitCommandEncoder> passBlit = [cmdBuffer blitCommandEncoder];
+        [passBlit copyFromTexture:sourceTexture
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                       sourceSize:MTLSizeMake(sourceTexture.width, sourceTexture.height, 1)
+                        toTexture:outputTexture
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [passBlit endEncoding];
     }
     
     // Tag drawable to prevent recursive presentation hooking

@@ -3,6 +3,20 @@
 #import "../Headers/TouchTracker.h"
 #import <UIKit/UIKit.h>
 #import <os/lock.h>
+#import <objc/runtime.h>
+#import <atomic>
+
+// MetalFG-owned output layer, attached as a sublayer on top of the game's CAMetalLayer.
+// S and N are presented into this layer's own swapchain, so the game's 3-drawable swapchain
+// is only used for rendering. ("Overlay" in the class name makes the Tweak.xm hooks ignore it.)
+@interface MetalFGOverlayMetalLayer : CAMetalLayer
+@end
+
+@implementation MetalFGOverlayMetalLayer
+- (id<CAAction>)actionForKey:(NSString *)event {
+    return (id<CAAction>)[NSNull null];
+}
+@end
 
 @interface MetalFGSynchronizer () {
     NSThread *_syncThread;
@@ -21,8 +35,14 @@
     BOOL _hasInjectedForCurrentNativeFrame;
     CFTimeInterval _smoothedNativeInterval;
     
-    // Serial queue that presents Ground Truth Frame N right behind S_{N-0.5}
+    // Serial queue that encodes/presents S_{N-0.5} and Ground Truth Frame N into the output layer
     dispatch_queue_t _presentQueue;
+    std::atomic<int> _queuedGameFrames;
+    
+    // Guarded by _syncLock
+    MetalFGOverlayMetalLayer *_outputLayer;
+    __weak CAMetalLayer *_outputHostLayer;
+    BOOL _outputAttachPending;
 }
 
 @end
@@ -167,7 +187,111 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
 
 - (void)setIsEnabled:(BOOL)isEnabled {
     _isEnabled = isEnabled;
+    if (!isEnabled) {
+        // The game presents to its own layer again; drop ours so it can't cover it with a stale frame
+        [self detachOutputLayer];
+    }
     [self savePreferences];
+}
+
+#pragma mark - Output Layer
+
+- (void)detachOutputLayer {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        os_unfair_lock_lock(&self->_syncLock);
+        MetalFGOverlayMetalLayer *layer = self->_outputLayer;
+        self->_outputLayer = nil;
+        self->_outputHostLayer = nil;
+        os_unfair_lock_unlock(&self->_syncLock);
+        
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [layer removeFromSuperlayer];
+        [CATransaction commit];
+    });
+}
+
+// Called on _presentQueue. Returns the ready output layer for gameLayer, or nil while it is
+// being (re)attached on the main thread.
+- (nullable CAMetalLayer *)outputLayerForGameLayer:(CAMetalLayer *)gameLayer sourceTexture:(id<MTLTexture>)source {
+    if (!gameLayer || !source) return nil;
+    
+    os_unfair_lock_lock(&_syncLock);
+    MetalFGOverlayMetalLayer *layer = _outputLayer;
+    CAMetalLayer *host = _outputHostLayer;
+    BOOL attachPending = _outputAttachPending;
+    os_unfair_lock_unlock(&_syncLock);
+    
+    if (layer && host == gameLayer && layer.pixelFormat == source.pixelFormat) {
+        CGSize sourceSize = CGSizeMake(source.width, source.height);
+        if (!CGSizeEqualToSize(layer.drawableSize, sourceSize)) {
+            layer.drawableSize = sourceSize;
+        }
+        if (!CGRectEqualToRect(layer.frame, gameLayer.bounds) || layer.contentsScale != gameLayer.contentsScale) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                layer.frame = gameLayer.bounds;
+                layer.contentsScale = gameLayer.contentsScale;
+                layer.contentsGravity = gameLayer.contentsGravity;
+                [CATransaction commit];
+            });
+        }
+        return layer;
+    }
+    
+    if (attachPending) return nil;
+    
+    os_unfair_lock_lock(&_syncLock);
+    _outputAttachPending = YES;
+    os_unfair_lock_unlock(&_syncLock);
+    
+    MTLPixelFormat pixelFormat = source.pixelFormat;
+    CGSize drawableSize = CGSizeMake(source.width, source.height);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        
+        os_unfair_lock_lock(&self->_syncLock);
+        MetalFGOverlayMetalLayer *oldLayer = self->_outputLayer;
+        self->_outputLayer = nil;
+        self->_outputHostLayer = nil;
+        os_unfair_lock_unlock(&self->_syncLock);
+        [oldLayer removeFromSuperlayer];
+        
+        MetalFGOverlayMetalLayer *newLayer = nil;
+        if (self->_isEnabled) {
+            newLayer = [MetalFGOverlayMetalLayer layer];
+            newLayer.device = gameLayer.device;
+            newLayer.pixelFormat = pixelFormat;
+            newLayer.framebufferOnly = NO;
+            newLayer.maximumDrawableCount = 3;
+            newLayer.allowsNextDrawableTimeout = YES;
+            if (@available(iOS 16.0, *)) {
+                newLayer.colorspace = gameLayer.colorspace;
+                newLayer.wantsExtendedDynamicRangeContent = gameLayer.wantsExtendedDynamicRangeContent;
+            }
+            newLayer.opaque = YES;
+            newLayer.contentsScale = gameLayer.contentsScale;
+            newLayer.contentsGravity = gameLayer.contentsGravity;
+            newLayer.frame = gameLayer.bounds;
+            newLayer.drawableSize = drawableSize;
+            // A fresh layer has no contents (transparent), so the game layer stays visible until our first present
+            [gameLayer addSublayer:newLayer];
+        }
+        [CATransaction commit];
+        
+        os_unfair_lock_lock(&self->_syncLock);
+        self->_outputLayer = newLayer;
+        self->_outputHostLayer = newLayer ? gameLayer : nil;
+        self->_outputAttachPending = NO;
+        os_unfair_lock_unlock(&self->_syncLock);
+        
+        if (newLayer) {
+            NSLog(@"[MetalFG] Attached output layer %.0fx%.0f on game layer %@", drawableSize.width, drawableSize.height, gameLayer);
+        }
+    });
+    return nil;
 }
 
 - (instancetype)init {
@@ -178,6 +302,8 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
         _shouldStopThread = NO;
         _isBackgrounded = NO;
         _hasInjectedForCurrentNativeFrame = NO;
+        _queuedGameFrames = 0;
+        _outputAttachPending = NO;
         _presentQueue = dispatch_queue_create("com.metalfg.nativePresent",
                                               dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
         _smoothedNativeInterval = 1.0 / 60.0;
@@ -269,6 +395,7 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
     _displayLink = nil;
     os_unfair_lock_unlock(&_syncLock);
     
+    [self detachOutputLayer];
     [[MetalFGTouchTracker sharedTracker] reset];
     NSLog(@"[MetalFG] Synchronizer stopped.");
 }
@@ -327,55 +454,60 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
     os_unfair_lock_unlock(&_syncLock);
     
     if (enabled && currentWarper) {
-        // SMFG 1.3 Major Stall Guard: Reset frame history only across true >125ms pauses/scene cuts
-        // so normal 25-60 FPS gameplay never drops a single synthetic frame
-        if (isMajorStall) {
-            [currentWarper resetFrameHistory];
-        }
-        // Option 3: Full 1-Frame Latency True Interpolation Model (LSFG / DLSS 3)
+        // Option 3: Full 1-Frame Latency True Interpolation Model (LSFG / DLSS 3), MetalFG-owned swapchain:
         // 1. Warper saves Ground Truth Frame N into double-buffered cache.
         // 2. Warper computes coarse-to-fine motion field between Frame N-1 and Frame N.
-        // 3. Warper synthesizes S_{N-0.5} into the native drawable and presents it with
-        //    afterMinimumDuration:(1/120 - 0.0005).
-        // 4. Ground Truth Frame N is presented immediately afterwards (no display-link polling);
-        //    afterMinimumDuration keeps S_{N-0.5} on screen for a full 120Hz refresh first.
-        uint64_t frameSerial = 0;
-        BOOL didInterpolate = [currentWarper processAndInterpolateNativeDrawable:drawable frameSerial:&frameSerial];
-        
-        if (didInterpolate) {
-            os_unfair_lock_lock(&_syncLock);
-            _syntheticFrameCount++;
-            os_unfair_lock_unlock(&_syncLock);
-            
-            dispatch_async(_presentQueue, ^{
-                [self presentNativeFrameWithSerial:frameSerial warper:currentWarper];
-            });
-        }
+        // 3. S_{N-0.5} is rendered into our output layer and presented with afterMinimumDuration.
+        // 4. Ground Truth Frame N follows immediately into the output layer; afterMinimumDuration
+        //    keeps S_{N-0.5} on screen for a full 120Hz refresh first.
+        // The game's drawable is never presented: it is only read, then returned to the game's swapchain.
+        _queuedGameFrames.fetch_add(1);
+        dispatch_async(_presentQueue, ^{
+            @autoreleasepool {
+                // SMFG 1.3 Major Stall Guard: Reset frame history only across true >125ms pauses/scene cuts
+                // (done on the present queue so it stays ordered with frames already queued)
+                if (isMajorStall) {
+                    [currentWarper resetFrameHistory];
+                }
+                // A newer game frame is already waiting: skip this frame's N so latency can't build up
+                BOOL catchUp = (self->_queuedGameFrames.fetch_sub(1) - 1) > 0;
+                [self presentGameDrawable:drawable warper:currentWarper catchUp:catchUp];
+            }
+        });
     }
 }
 
-- (void)presentNativeFrameWithSerial:(uint64_t)serial warper:(MetalFGWarper *)warper {
-    // nextDrawable returns an autoreleased drawable. GCD drains its pools at undefined times,
-    // so without a local pool the drawable is never returned to the layer's 3-slot swapchain
-    // and the game's own nextDrawable starves (1s allowsNextDrawableTimeout hangs).
-    @autoreleasepool {
-        if (_isBackgrounded || !_isEnabled) return;
-        
-        os_unfair_lock_lock(&_syncLock);
-        CAMetalLayer *layer = _activeLayer;
-        os_unfair_lock_unlock(&_syncLock);
-        if (!layer) return;
-        
-        CGSize drawableSize = layer.drawableSize;
-        if (drawableSize.width < 250.0 || drawableSize.height < 150.0) return;
-        
-        id<CAMetalDrawable> nativeDrawable = [layer nextDrawable];
-        if (!nativeDrawable || !nativeDrawable.texture) return;
-        
-        // Returns NO if S_{N+0.5} was already committed while we waited for a drawable;
-        // showing Frame N after it would step backwards, so it is skipped instead.
-        [warper presentCachedNativeFrameWithSerial:serial toDrawable:nativeDrawable];
+// Runs on _presentQueue inside an autorelease pool (nextDrawable returns autoreleased drawables;
+// GCD drains its own pools at undefined times, which would starve the swapchain).
+- (void)presentGameDrawable:(id<CAMetalDrawable>)gameDrawable warper:(MetalFGWarper *)warper catchUp:(BOOL)catchUp {
+    if (_isBackgrounded) return;
+    
+    id<MTLTexture> source = gameDrawable.texture;
+    CAMetalLayer *gameLayer = gameDrawable.layer;
+    CAMetalLayer *outputLayer = _isEnabled ? [self outputLayerForGameLayer:gameLayer sourceTexture:source] : nil;
+    if (!outputLayer) {
+        // Output layer not attached yet (or FG just turned off): show the game frame untouched
+        objc_setAssociatedObject(gameDrawable, &kMetalFGIsSyntheticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [gameDrawable present];
+        return;
     }
+    
+    id<CAMetalDrawable> synthDrawable = [outputLayer nextDrawable];
+    if (!synthDrawable) return;
+    
+    uint64_t frameSerial = 0;
+    BOOL didInterpolate = [warper processSourceTexture:source outputDrawable:synthDrawable frameSerial:&frameSerial];
+    if (!didInterpolate) return; // First frame: Ground Truth was shown directly
+    
+    os_unfair_lock_lock(&_syncLock);
+    _syntheticFrameCount++;
+    os_unfair_lock_unlock(&_syncLock);
+    
+    if (catchUp) return;
+    
+    id<CAMetalDrawable> nativeDrawable = [outputLayer nextDrawable];
+    if (!nativeDrawable) return;
+    [warper presentCachedNativeFrameWithSerial:frameSerial toDrawable:nativeDrawable];
 }
 
 - (void)notifyNativeFramePresented:(id<MTLTexture>)texture

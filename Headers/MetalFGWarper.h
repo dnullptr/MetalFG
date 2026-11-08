@@ -54,6 +54,13 @@ extern const char kMetalFGIsSyntheticKey;
 - (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable frameSerial:(nullable uint64_t *)outSerial;
 - (BOOL)presentCachedNativeFrameWithSerial:(uint64_t)serial toDrawable:(id<CAMetalDrawable>)targetDrawable;
 
+// Output-layer pipeline: caches sourceTexture as Ground Truth N, renders S_{N-0.5} (or N itself when
+// there is no previous frame) into outputDrawable and presents it. outputDrawable must match
+// sourceTexture's size and pixel format. Returns YES if a synthetic frame was produced.
+- (BOOL)processSourceTexture:(id<MTLTexture>)sourceTexture
+              outputDrawable:(id<CAMetalDrawable>)outputDrawable
+                 frameSerial:(nullable uint64_t *)outSerial;
+
 // Reset history (e.g. after irregular stall/hitch)
 - (void)resetFrameHistory;
 
