@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -99,4 +100,29 @@ jobs:
             > [!NOTE]
             > A nightly build is basically the next update partially done. Additionally, this build might have the old version number but the code itself should has the latest commit.
           prerelease: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  release-stable:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rootless-package
+          path: ./packages
+
+      - name: publish stable release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "./packages/*.deb"
+          allowUpdates: true
+          tag: ${{ github.ref_name }}
+          name: "MetalFG ${{ github.ref_name }}"
+          generateReleaseNotes: true
+          makeLatest: true
+          prerelease: false
           token: ${{ secrets.GITHUB_TOKEN }}

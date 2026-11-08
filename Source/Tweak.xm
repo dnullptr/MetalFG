@@ -339,7 +339,7 @@ static inline void ProcessNativePresentation(id<CAMetalDrawable> drawable) {
         }
         
         NSLog(@"==================================================");
-        NSLog(@"[MetalFG] Initializing MetalFG v2.4.0 (SMFG 1.3 True-Midpoint Engine) for target: %s (%s)", progname, execPath);
+        NSLog(@"[MetalFG] Initializing MetalFG v3.0.0 (SMFG 1.3 True-Midpoint Engine) for target: %s (%s)", progname, execPath);
         NSLog(@"==================================================");
         
         // Initialize Logos hooks strictly for this app process

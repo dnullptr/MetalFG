@@ -1,7 +1,7 @@
 Package: com.dnullptr.metalfg
 Name: MetalFG
 Depends: mobilesubstrate (>= 0.9.5000)
-Version: 2.4.0
+Version: 3.0.0
 Architecture: iphoneos-arm64
 Description: High-performance GPU Frame Interpolation (SMFG 1.3 Super-Motion Engine) with Zero-Mean Optical Flow, Hardware-Paced 120Hz ProMotion VSYNC Cadence, and Dopamine Reboot-Safe Injection for iOS 16 ProMotion devices.
 Maintainer: dnullptr

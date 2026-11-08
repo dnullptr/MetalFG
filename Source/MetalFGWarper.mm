@@ -113,7 +113,7 @@ static inline void MFGTrackPresentation(id<CAMetalDrawable> drawable, MFGPresent
     }];
 }
 
-// Embedded fallback Metal Shading Language source (SMFG 1.3 Super-Motion Engine v2.4.0)
+// Embedded fallback Metal Shading Language source (SMFG 1.3 Super-Motion Engine v3.0.0)
 static NSString * const kEmbeddedMetalSource = @""
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
@@ -567,7 +567,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         }
         
         _isReady = YES;
-        NSLog(@"[MetalFG] MetalFGWarper v2.4.0 initialized successfully for pixelFormat %lu.", (unsigned long)pixelFormat);
+        NSLog(@"[MetalFG] MetalFGWarper v3.0.0 initialized successfully for pixelFormat %lu.", (unsigned long)pixelFormat);
     }
     return self;
 }
