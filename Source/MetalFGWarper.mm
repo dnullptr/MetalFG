@@ -12,7 +12,7 @@ static const uint32_t kGridHeight = 45;
 // 120Hz ProMotion minimum frame duration (8.33ms minus 0.5ms VSYNC clock jitter tolerance)
 static const CFTimeInterval kProMotion120HzMinDuration = (1.0 / 120.0) - 0.0005;
 
-// Embedded fallback Metal Shading Language source (SMFG 1.1 Super-Motion Engine v2.3.0)
+// Embedded fallback Metal Shading Language source (SMFG 1.3 Super-Motion Engine v2.4.0)
 static NSString * const kEmbeddedMetalSource = @""
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
@@ -57,21 +57,32 @@ static NSString * const kEmbeddedMetalSource = @""
 "inline float eval_candidate_patch(texture2d<float, access::sample> prevTexture,\n"
 "                                  const thread float2 uvsCurr[9],\n"
 "                                  const thread float3 rgbCurr[9],\n"
+"                                  float3 patchMeanCurr,\n"
 "                                  float2 candidate) {\n"
 "    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);\n"
+"    float3 rgbPrev[9];\n"
+"    float3 patchMeanPrev = float3(0.0f);\n"
+"    for (int i = 0; i < 9; i++) {\n"
+"        rgbPrev[i] = prevTexture.sample(s, uvsCurr[i] - candidate).rgb;\n"
+"        patchMeanPrev += rgbPrev[i];\n"
+"    }\n"
+"    patchMeanPrev *= (1.0f / 9.0f);\n"
+"    float3 meanShift = (patchMeanCurr - patchMeanPrev) * 0.75f;\n"
 "    float error = 0.0f;\n"
 "    for (int i = 0; i < 9; i++) {\n"
-"        float3 rgbPrev = prevTexture.sample(s, uvsCurr[i] - candidate).rgb;\n"
-"        error += min(rgb_luma_diff(rgbCurr[i], rgbPrev), 0.25f);\n"
+"        error += min(rgb_luma_diff(rgbCurr[i] - meanShift, rgbPrev[i]), 0.25f);\n"
 "    }\n"
-"    return error * (1.0f / 9.0f);\n"
+"    return error * (1.0f / 9.0f) + 0.20f * min(rgb_luma_diff(patchMeanCurr, patchMeanPrev), 0.25f);\n"
 "}\n"
 "\n"
 "inline float4 sample_sharp_clamped(texture2d<float, access::sample> tex,\n"
 "                                   float2 uv,\n"
-"                                   float2 texelSize) {\n"
+"                                   float2 texelSize,\n"
+"                                   float pace) {\n"
 "    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);\n"
 "    float4 center = tex.sample(s, uv);\n"
+"    float sharpScale = 1.0f - smoothstep(0.006f, 0.016f, pace);\n"
+"    if (sharpScale <= 0.02f) return center;\n"
 "    float3 n0 = tex.sample(s, uv + float2(-texelSize.x, 0.0f)).rgb;\n"
 "    float3 n1 = tex.sample(s, uv + float2( texelSize.x, 0.0f)).rgb;\n"
 "    float3 n2 = tex.sample(s, uv + float2(0.0f, -texelSize.y)).rgb;\n"
@@ -79,8 +90,9 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float3 minNeighbor = min(center.rgb, min(min(n0, n1), min(n2, n3)));\n"
 "    float3 maxNeighbor = max(center.rgb, max(max(n0, n1), max(n2, n3)));\n"
 "    float3 meanCross = (n0 + n1 + n2 + n3) * 0.25f;\n"
-"    float3 sharpened = center.rgb + (center.rgb - meanCross) * 0.35f;\n"
-"    return float4(clamp(sharpened, minNeighbor, maxNeighbor), center.a);\n"
+"    float3 sharpened = center.rgb + (center.rgb - meanCross) * (0.35f * sharpScale);\n"
+"    float3 minBound = max(minNeighbor, float3(0.0f));\n"
+"    return float4(clamp(sharpened, minBound, maxNeighbor), center.a);\n"
 "}\n"
 "\n"
 "vertex RasterizerData metalfg_vertex(uint vertexID [[vertex_id]],\n"
@@ -95,6 +107,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "                                           texture2d<float, access::sample> prevTexture [[texture(0)]],\n"
 "                                           texture2d<float, access::sample> currTexture [[texture(1)]],\n"
 "                                           texture2d<float, access::write> motionVectors [[texture(2)]],\n"
+"                                           texture2d<float, access::read> prevMotionVectors [[texture(3)]],\n"
 "                                           constant MetalFGBMEUniforms &uniforms [[buffer(0)]]) {\n"
 "    if (gid.x >= uniforms.gridDimensions.x || gid.y >= uniforms.gridDimensions.y) return;\n"
 "    float2 centerUV = (float2(gid) + 0.5f) / float2(uniforms.gridDimensions);\n"
@@ -119,7 +132,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "        patchContrast += rgb_luma_diff(rgbCurr[i], patchMean);\n"
 "    }\n"
 "    patchContrast *= (1.0f / 9.0f);\n"
-"    float errZero = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, float2(0.0f, 0.0f));\n"
+"    float errZero = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, float2(0.0f, 0.0f));\n"
 "    if (isHUDZone && errZero < uniforms.uiThreshold * 0.65f && patchContrast > 0.020f) {\n"
 "        float sureZero = saturate(patchContrast * 12.0f);\n"
 "        motionVectors.write(float4(0.0f, 0.0f, errZero, sureZero), gid);\n"
@@ -138,9 +151,15 @@ static NSString * const kEmbeddedMetalSource = @""
 "        float2( 0.7071f, -0.7071f), float2(-0.7071f, -0.7071f)\n"
 "    };\n"
 "    if (dot(prior, prior) > 1e-6f) {\n"
-"        float errPrior = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, prior);\n"
+"        float errPrior = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, prior);\n"
 "        float costPrior = errPrior + kMargin * 0.5f;\n"
 "        if (costPrior < bestCost) { bestCost = costPrior; bestError = errPrior; bestVector = prior; }\n"
+"    }\n"
+"    float2 temporalPrior = prevMotionVectors.read(gid).xy;\n"
+"    if (dot(temporalPrior, temporalPrior) > 1e-6f) {\n"
+"        float errTemp = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, temporalPrior);\n"
+"        float costTemp = errTemp + kMargin * 0.45f;\n"
+"        if (costTemp < bestCost) { bestCost = costTemp; bestError = errTemp; bestVector = temporalPrior; }\n"
 "    }\n"
 "    const float seedRadii[4] = {\n"
 "        0.0018f,\n"
@@ -152,7 +171,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "        float rad = seedRadii[r];\n"
 "        for (int i = 0; i < 8; i++) {\n"
 "            float2 cand = dirs[i] * rad;\n"
-"            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);\n"
+"            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, cand);\n"
 "            float cost = err + kMargin + kDistPenalty * length(cand - prior);\n"
 "            if (cost < bestCost) { bestCost = cost; bestError = err; bestVector = cand; }\n"
 "        }\n"
@@ -165,24 +184,24 @@ static NSString * const kEmbeddedMetalSource = @""
 "            float2 cand = centerCand + dirs[i] * stepSize;\n"
 "            float candLen = length(cand);\n"
 "            if (candLen > uniforms.maxDisplacement) cand = (cand / candLen) * uniforms.maxDisplacement;\n"
-"            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);\n"
+"            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, cand);\n"
 "            float cost = err + kMargin * 0.5f + kDistPenalty * length(cand - prior);\n"
 "            if (cost < bestCost) { bestCost = cost; bestError = err; bestVector = cand; }\n"
 "        }\n"
 "    }\n"
 "    if (dot(bestVector, bestVector) > 1e-8f && patchContrast > 0.005f) {\n"
 "        const float stepUV = 0.0005f;\n"
-"        float ex0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2(-stepUV, 0.0f));\n"
-"        float ex1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2( stepUV, 0.0f));\n"
-"        float ey0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2(0.0f, -stepUV));\n"
-"        float ey1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2(0.0f,  stepUV));\n"
+"        float ex0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, bestVector + float2(-stepUV, 0.0f));\n"
+"        float ex1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, bestVector + float2( stepUV, 0.0f));\n"
+"        float ey0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, bestVector + float2(0.0f, -stepUV));\n"
+"        float ey1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, bestVector + float2(0.0f,  stepUV));\n"
 "        float bendX = ex0 - 2.0f * bestError + ex1;\n"
 "        float bendY = ey0 - 2.0f * bestError + ey1;\n"
 "        float2 part = float2(0.0f);\n"
 "        if (bendX > 1e-4f) part.x = clamp(0.5f * (ex0 - ex1) / bendX, -0.5f, 0.5f) * stepUV;\n"
 "        if (bendY > 1e-4f) part.y = clamp(0.5f * (ey0 - ey1) / bendY, -0.5f, 0.5f) * stepUV;\n"
 "        float2 subpelCand = bestVector + part;\n"
-"        float errSubpel = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, subpelCand);\n"
+"        float errSubpel = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, subpelCand);\n"
 "        if (errSubpel <= bestError) { bestError = errSubpel; bestVector = subpelCand; }\n"
 "    }\n"
 "    if (bestError >= errZero - 0.0003f) {\n"
@@ -248,7 +267,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "        ownMV = mix(largeMV, ownMV, saturate(ownSure * 2.2f));\n"
 "        ownSure = max(ownSure, min(0.75f, largeWeight * 0.08f));\n"
 "    }\n"
-"    float spread = 0.0020f + 0.25f * length(ownMV);\n"
+"    float spread = 0.0014f + 0.20f * length(ownMV);\n"
 "    float2 fluidSum = float2(0.0f);\n"
 "    float fluidWeight = 0.0f;\n"
 "    for (int dy = -2; dy <= 2; dy++) {\n"
@@ -258,7 +277,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "            float4 other = inVectors.read(uint2(cx, cy));\n"
 "            float2 d = other.xy - ownMV;\n"
 "            float spatialW = (abs(dx) == 2 || abs(dy) == 2) ? 0.5f : 1.0f;\n"
-"            float confW = 0.25f + 0.75f * other.w;\n"
+"            float confW = 0.20f + 0.80f * other.w;\n"
 "            float w = exp(-dot(d, d) / (2.0f * spread * spread)) * confW * spatialW;\n"
 "            fluidSum += w * other.xy;\n"
 "            fluidWeight += w;\n"
@@ -289,6 +308,7 @@ static NSString * const kEmbeddedMetalSource = @""
 "    float2 effMV = mv;\n"
 "    if (dot(mvFwd, mvFwd) > dot(effMV, effMV) * 1.15f) effMV = mvFwd;\n"
 "    if (dot(mvBack, mvBack) > dot(effMV, effMV) * 1.15f) effMV = mvBack;\n"
+"    if (distance(mvFwd, mvBack) < 0.0015f && dot(mvFwd, mvBack) > 0.0f) effMV = (mvFwd + mvBack) * 0.5f;\n"
 "    float mvMag = length(effMV);\n"
 "    if (mvMag < uniforms.motionDeadzone) {\n"
 "        if (uniforms.debugTint > 0.5f) { currColor.b = min(1.0f, currColor.b * 1.25f + 0.10f); }\n"
@@ -341,17 +361,17 @@ static NSString * const kEmbeddedMetalSource = @""
 "        float2 mvAtCurr = motionVectors.sample(linearSampler, uvCurr).xy;\n"
 "        float2 mvAtPrev = motionVectors.sample(linearSampler, uvPrev).xy;\n"
 "        float reach = max(0.0018f, 0.30f * pace);\n"
-"        bool wrongCurr = (distance(mvAtCurr, effMV) > reach) && (length(mvAtCurr) < 0.50f * pace);\n"
-"        bool wrongPrev = (distance(mvAtPrev, effMV) > reach) && (length(mvAtPrev) < 0.50f * pace);\n"
-"        if (wrongPrev && !wrongCurr) sharePrev = 0.0f;\n"
-"        else if (wrongCurr && !wrongPrev) sharePrev = 1.0f;\n"
+"        float occCurr = smoothstep(reach * 0.75f, reach * 1.25f, distance(mvAtCurr, effMV)) * smoothstep(0.65f * pace, 0.35f * pace, length(mvAtCurr));\n"
+"        float occPrev = smoothstep(reach * 0.75f, reach * 1.25f, distance(mvAtPrev, effMV)) * smoothstep(0.65f * pace, 0.35f * pace, length(mvAtPrev));\n"
+"        if (occPrev > occCurr + 0.05f) sharePrev = 0.5f * (1.0f - saturate((occPrev - occCurr) * 1.25f));\n"
+"        else if (occCurr > occPrev + 0.05f) sharePrev = mix(0.5f, 1.0f, saturate((occCurr - occPrev) * 1.25f));\n"
 "    }\n"
-"    float4 sampleCurr = sample_sharp_clamped(sourceTexture, uvCurr, texelSize);\n"
+"    float4 sampleCurr = sample_sharp_clamped(sourceTexture, uvCurr, texelSize, pace);\n"
 "    if (sharePrev <= 0.001f) {\n"
 "        if (uniforms.debugTint > 0.5f) sampleCurr.g = min(1.0f, sampleCurr.g * 1.35f + 0.15f);\n"
 "        return sampleCurr;\n"
 "    }\n"
-"    float4 samplePrev = sample_sharp_clamped(prevTexture, uvPrev, texelSize);\n"
+"    float4 samplePrev = sample_sharp_clamped(prevTexture, uvPrev, texelSize, pace);\n"
 "    if (sharePrev >= 0.999f) {\n"
 "        if (uniforms.debugTint > 0.5f) samplePrev.g = min(1.0f, samplePrev.g * 1.35f + 0.15f);\n"
 "        return samplePrev;\n"
@@ -438,7 +458,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         }
         
         _isReady = YES;
-        NSLog(@"[MetalFG] MetalFGWarper v2.3.0 initialized successfully for pixelFormat %lu.", (unsigned long)pixelFormat);
+        NSLog(@"[MetalFG] MetalFGWarper v2.4.0 initialized successfully for pixelFormat %lu.", (unsigned long)pixelFormat);
     }
     return self;
 }
@@ -615,6 +635,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         [comp setTexture:prevTexture atIndex:MetalFGBMETexturePrev];
         [comp setTexture:destTexture atIndex:MetalFGBMETextureCurr];
         [comp setTexture:rawMVTexture atIndex:MetalFGBMETextureMotionVectors];
+        [comp setTexture:(smoothMVTexture ? smoothMVTexture : rawMVTexture) atIndex:MetalFGBMETexturePrevMotionVectors];
         
         MetalFGBMEUniforms bmeUniforms;
         bmeUniforms.touchVelocity = touchVelocity;
@@ -817,6 +838,7 @@ static const MetalFGVertex kQuadVertices[6] = {
     [comp setTexture:prevTexture atIndex:MetalFGBMETexturePrev];
     [comp setTexture:destTexture atIndex:MetalFGBMETextureCurr];
     [comp setTexture:rawMVTexture atIndex:MetalFGBMETextureMotionVectors];
+    [comp setTexture:(smoothMVTexture ? smoothMVTexture : rawMVTexture) atIndex:MetalFGBMETexturePrevMotionVectors];
     
     MetalFGBMEUniforms bmeUniforms;
     bmeUniforms.touchVelocity = touchVelocity;
@@ -937,6 +959,7 @@ static const MetalFGVertex kQuadVertices[6] = {
         [comp setTexture:prevTexture atIndex:MetalFGBMETexturePrev];
         [comp setTexture:destTexture atIndex:MetalFGBMETextureCurr];
         [comp setTexture:rawMVTexture atIndex:MetalFGBMETextureMotionVectors];
+        [comp setTexture:(smoothMVTexture ? smoothMVTexture : rawMVTexture) atIndex:MetalFGBMETexturePrevMotionVectors];
         
         simd_float2 touchVel = [[MetalFGTouchTracker sharedTracker] normalizedVelocityForScreenSize:CGSizeMake(sourceTexture.width, sourceTexture.height)];
         MetalFGBMEUniforms bmeUniforms;
@@ -1064,6 +1087,12 @@ static const MetalFGVertex kQuadVertices[6] = {
     
     [cmdBuffer commit];
     return YES;
+}
+
+- (void)resetFrameHistory {
+    os_unfair_lock_lock(&_textureLock);
+    _hasValidBaseFrame = NO;
+    os_unfair_lock_unlock(&_textureLock);
 }
 
 @end

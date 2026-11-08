@@ -305,8 +305,18 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
     
     os_unfair_lock_lock(&_syncLock);
     CFTimeInterval interval = now - _lastNativeFrameTime;
+    BOOL isIrregular = NO;
     if (interval > 0.005 && interval < 0.200) {
-        _smoothedNativeInterval = _smoothedNativeInterval * 0.85 + interval * 0.15;
+        CFTimeInterval irregularThreshold = MAX(2.5 * _smoothedNativeInterval, _smoothedNativeInterval + 0.025);
+        if (_smoothedNativeInterval > 0.005 && interval > irregularThreshold) {
+            isIrregular = YES;
+            // SMFG 1.3: Update EMA slowly on hitches/stutters (lf_fg_pace.inl)
+            _smoothedNativeInterval = _smoothedNativeInterval * 0.96 + interval * 0.04;
+        } else {
+            _smoothedNativeInterval = _smoothedNativeInterval * 0.85 + interval * 0.15;
+        }
+    } else if (interval >= 0.200) {
+        isIrregular = YES;
     }
     _lastNativeFrameTime = now;
     _nativeFrameCount++;
@@ -318,6 +328,11 @@ static NSString * const kCurrentPrefsSchema = @"2.3.0";
     os_unfair_lock_unlock(&_syncLock);
     
     if (enabled && currentWarper) {
+        // SMFG 1.3 Irregular Hitch Guard: Reset frame history across stutters/loading spikes
+        // to prevent synthetic burst distortion across sudden long frame spans
+        if (isIrregular) {
+            [currentWarper resetFrameHistory];
+        }
         // Option 3: Full 1-Frame Latency True Interpolation Model (LSFG / DLSS 3)
         // 1. Warper saves Ground Truth Frame N into double-buffered cache.
         // 2. Warper computes coarse-to-fine motion field between Frame N-1 and Frame N.

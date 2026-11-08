@@ -24,30 +24,47 @@ inline float rgb_luma_diff(float3 a, float3 b) {
     return dot(d, kLumaWeights) * 0.65f + max(d.r, max(d.g, d.b)) * 0.35f;
 }
 
-// Capped patch sample error (lf_estimate_shader.h kCap = 0.25)
+// SMFG 1.3 Illumination-Invariant Zero-Mean Patch Error (ZSAD + Capped Miss):
+// Subtracts 75% of the mean patch brightness/exposure shift between Frame N-1 and Frame N
+// before measuring structural sample differences, making optical flow resilient to shadows,
+// dynamic lighting, and specular highlights while still penalizing flat color mismatches.
 // Note: Matches currTexture(uv) against prevTexture(uv - candidate),
 // so a matched candidate vector is v = uv_curr - uv_prev (forward displacement from Frame N-1 to Frame N).
 inline float eval_candidate_patch(texture2d<float, access::sample> prevTexture,
                                   const thread float2 uvsCurr[9],
                                   const thread float3 rgbCurr[9],
+                                  float3 patchMeanCurr,
                                   float2 candidate) {
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+    float3 rgbPrev[9];
+    float3 patchMeanPrev = float3(0.0f);
+    for (int i = 0; i < 9; i++) {
+        rgbPrev[i] = prevTexture.sample(s, uvsCurr[i] - candidate).rgb;
+        patchMeanPrev += rgbPrev[i];
+    }
+    patchMeanPrev *= (1.0f / 9.0f);
+    
+    float3 meanShift = (patchMeanCurr - patchMeanPrev) * 0.75f;
     float error = 0.0f;
     for (int i = 0; i < 9; i++) {
-        float3 rgbPrev = prevTexture.sample(s, uvsCurr[i] - candidate).rgb;
-        error += min(rgb_luma_diff(rgbCurr[i], rgbPrev), 0.25f);
+        error += min(rgb_luma_diff(rgbCurr[i] - meanShift, rgbPrev[i]), 0.25f);
     }
-    return error * (1.0f / 9.0f);
+    return error * (1.0f / 9.0f) + 0.20f * min(rgb_luma_diff(patchMeanCurr, patchMeanPrev), 0.25f);
 }
 
-// SMFG Round 56 Sharp Sub-Pixel Reconstruction (Clamped Catmull-Rom 5-Tap Filter):
-// Restores fine sub-pixel texture energy lost by bilinear filtering during half-step
-// warps while clamping strictly to the local 2x2 neighborhood min/max to prevent halo ringing.
+// SMFG 1.3 Motion-Adaptive Clamped Catmull-Rom 5-Tap Reconstruction:
+// Restores fine sub-pixel texture energy during slow/medium warps while smoothly
+// scaling down sharpening at high velocity (> 6-16 px) to save bandwidth and prevent fast-pan shimmer.
 inline float4 sample_sharp_clamped(texture2d<float, access::sample> tex,
                                    float2 uv,
-                                   float2 texelSize) {
+                                   float2 texelSize,
+                                   float pace) {
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     float4 center = tex.sample(s, uv);
+    float sharpScale = 1.0f - smoothstep(0.006f, 0.016f, pace);
+    if (sharpScale <= 0.02f) {
+        return center;
+    }
     float3 n0 = tex.sample(s, uv + float2(-texelSize.x, 0.0f)).rgb;
     float3 n1 = tex.sample(s, uv + float2( texelSize.x, 0.0f)).rgb;
     float3 n2 = tex.sample(s, uv + float2(0.0f, -texelSize.y)).rgb;
@@ -58,8 +75,10 @@ inline float4 sample_sharp_clamped(texture2d<float, access::sample> tex,
     
     // High-frequency detail restoration (matches Catmull-Rom negative lobe weight)
     float3 meanCross = (n0 + n1 + n2 + n3) * 0.25f;
-    float3 sharpened = center.rgb + (center.rgb - meanCross) * 0.35f;
-    return float4(clamp(sharpened, minNeighbor, maxNeighbor), center.a);
+    float3 sharpened = center.rgb + (center.rgb - meanCross) * (0.35f * sharpScale);
+    // EDR/HDR highlight safety: clamp to neighborhood max, but prevent negative undershoot
+    float3 minBound = max(minNeighbor, float3(0.0f));
+    return float4(clamp(sharpened, minBound, maxNeighbor), center.a);
 }
 
 // ============================================================================
@@ -81,6 +100,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
                                            texture2d<float, access::sample> prevTexture [[texture(MetalFGBMETexturePrev)]],
                                            texture2d<float, access::sample> currTexture [[texture(MetalFGBMETextureCurr)]],
                                            texture2d<float, access::write> motionVectors [[texture(MetalFGBMETextureMotionVectors)]],
+                                           texture2d<float, access::read> prevMotionVectors [[texture(MetalFGBMETexturePrevMotionVectors)]],
                                            constant MetalFGBMEUniforms &uniforms [[buffer(MetalFGBufferIndexBMEUniforms)]]) {
     if (gid.x >= uniforms.gridDimensions.x || gid.y >= uniforms.gridDimensions.y) {
         return;
@@ -120,7 +140,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     patchContrast *= (1.0f / 9.0f);
     
     // 2. Test stationary candidate (0, 0) first
-    float errZero = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, float2(0.0f, 0.0f));
+    float errZero = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, float2(0.0f, 0.0f));
     
     // Only anchor immediately to zero in HUD zones when stationary error is near-exact
     if (isHUDZone && errZero < uniforms.uiThreshold * 0.65f && patchContrast > 0.020f) {
@@ -147,14 +167,27 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         float2( 0.7071f, -0.7071f), float2(-0.7071f, -0.7071f)
     };
     
-    // Stage A: Multi-Radius Seed Search around origin and touch-velocity prior
+    // Stage A: Multi-Radius Seed Search around origin, touch-velocity prior, and SMFG 1.3 Temporal Flow Prior
     if (dot(prior, prior) > 1e-6f) {
-        float errPrior = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, prior);
+        float errPrior = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, prior);
         float costPrior = errPrior + kMargin * 0.5f;
         if (costPrior < bestCost) {
             bestCost = costPrior;
             bestError = errPrior;
             bestVector = prior;
+        }
+    }
+    
+    // SMFG 1.3 Temporal Previous-Pair Flow Rescue (prev_flow):
+    // Tests the settled motion vector from the previous frame pair at this macroblock.
+    float2 temporalPrior = prevMotionVectors.read(gid).xy;
+    if (dot(temporalPrior, temporalPrior) > 1e-6f) {
+        float errTemp = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, temporalPrior);
+        float costTemp = errTemp + kMargin * 0.45f;
+        if (costTemp < bestCost) {
+            bestCost = costTemp;
+            bestError = errTemp;
+            bestVector = temporalPrior;
         }
     }
     
@@ -169,7 +202,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         float rad = seedRadii[r];
         for (int i = 0; i < 8; i++) {
             float2 cand = dirs[i] * rad;
-            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);
+            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, cand);
             float cost = err + kMargin + kDistPenalty * length(cand - prior);
             if (cost < bestCost) {
                 bestCost = cost;
@@ -191,7 +224,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
             if (candLen > uniforms.maxDisplacement) {
                 cand = (cand / candLen) * uniforms.maxDisplacement;
             }
-            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, cand);
+            float err = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, cand);
             float cost = err + kMargin * 0.5f + kDistPenalty * length(cand - prior);
             if (cost < bestCost) {
                 bestCost = cost;
@@ -204,10 +237,10 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
     // Stage C: SMFG Analytical Parabolic Sub-Pixel Refinement (SubpelMain, msm_fg.h lines 398-404)
     if (dot(bestVector, bestVector) > 1e-8f && patchContrast > 0.005f) {
         const float stepUV = 0.0005f;
-        float ex0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2(-stepUV, 0.0f));
-        float ex1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2( stepUV, 0.0f));
-        float ey0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2(0.0f, -stepUV));
-        float ey1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, bestVector + float2(0.0f,  stepUV));
+        float ex0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, bestVector + float2(-stepUV, 0.0f));
+        float ex1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, bestVector + float2( stepUV, 0.0f));
+        float ey0 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, bestVector + float2(0.0f, -stepUV));
+        float ey1 = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, bestVector + float2(0.0f,  stepUV));
         
         float bendX = ex0 - 2.0f * bestError + ex1;
         float bendY = ey0 - 2.0f * bestError + ey1;
@@ -216,7 +249,7 @@ kernel void metalfg_block_motion_estimation(uint2 gid [[thread_position_in_grid]
         if (bendY > 1e-4f) part.y = clamp(0.5f * (ey0 - ey1) / bendY, -0.5f, 0.5f) * stepUV;
         
         float2 subpelCand = bestVector + part;
-        float errSubpel = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, subpelCand);
+        float errSubpel = eval_candidate_patch(prevTexture, uvsCurr, rgbCurr, patchMean, subpelCand);
         if (errSubpel <= bestError) {
             bestError = errSubpel;
             bestVector = subpelCand;
@@ -331,8 +364,8 @@ kernel void metalfg_motion_median_filter(uint2 gid [[thread_position_in_grid]],
         ownSure = max(ownSure, min(0.75f, largeWeight * 0.08f));
     }
     
-    // Round 39 Bilateral Fluid Filter (EdgeMain lines 761-781):
-    float spread = 0.0020f + 0.25f * length(ownMV);
+    // SMFG 1.3 Tightened Bilateral Fluid Filter (EdgeMain fluid_near = 0.75, fluid_share = 0.25):
+    float spread = 0.0014f + 0.20f * length(ownMV);
     float2 fluidSum = float2(0.0f);
     float fluidWeight = 0.0f;
     for (int dy = -2; dy <= 2; dy++) {
@@ -342,7 +375,7 @@ kernel void metalfg_motion_median_filter(uint2 gid [[thread_position_in_grid]],
             float4 other = inVectors.read(uint2(cx, cy));
             float2 d = other.xy - ownMV;
             float spatialW = (abs(dx) == 2 || abs(dy) == 2) ? 0.5f : 1.0f;
-            float confW = 0.25f + 0.75f * other.w;
+            float confW = 0.20f + 0.80f * other.w;
             float w = exp(-dot(d, d) / (2.0f * spread * spread)) * confW * spatialW;
             fluidSum += w * other.xy;
             fluidWeight += w;
@@ -399,6 +432,12 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     }
     if (dot(mvBack, mvBack) > dot(effMV, effMV) * 1.15f) {
         effMV = mvBack;
+    }
+    
+    // SMFG 1.3 Bidirectional Sub-Pixel Agreement:
+    // When forward and backward motion vectors agree closely, average them to halve sub-pixel jitter
+    if (distance(mvFwd, mvBack) < 0.0015f && dot(mvFwd, mvBack) > 0.0f) {
+        effMV = (mvFwd + mvBack) * 0.5f;
     }
     
     float mvMag = length(effMV);
@@ -480,11 +519,11 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
     }
     
     // ========================================================================
-    // 3. Round 53 Foreground / Head Silhouette Anti-Ghosting (msm_fg.h lines 848-869):
+    // 3. SMFG 1.3 Smooth Bilinear Foreground / Head Silhouette Anti-Ghosting:
     // When a slow/stationary foreground object (e.g. player character/head) occludes a moving
     // background, one of the warped sample points (`uvCurr` or `uvPrev`) lands on the stationary
-    // foreground object. Check the motion vector at both sample points and switch cleanly to the
-    // unoccluded frame when one side hits a slower foreground object!
+    // foreground object. Smoothly weight the bilinearly sampled motion mismatch at both sample
+    // points so foreground silhouettes have zero blocky tile stair-stepping!
     // ========================================================================
     float2 uvCurr = clamp(uv + effMV * t, float2(0.001f), float2(0.999f));
     float2 uvPrev = clamp(uv - effMV * t, float2(0.001f), float2(0.999f));
@@ -496,22 +535,24 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
         float2 mvAtPrev = motionVectors.sample(linearSampler, uvPrev).xy;
         float reach = max(0.0018f, 0.30f * pace);
         
-        bool wrongCurr = (distance(mvAtCurr, effMV) > reach) && (length(mvAtCurr) < 0.50f * pace);
-        bool wrongPrev = (distance(mvAtPrev, effMV) > reach) && (length(mvAtPrev) < 0.50f * pace);
+        float occCurr = smoothstep(reach * 0.75f, reach * 1.25f, distance(mvAtCurr, effMV)) *
+                        smoothstep(0.65f * pace, 0.35f * pace, length(mvAtCurr));
+        float occPrev = smoothstep(reach * 0.75f, reach * 1.25f, distance(mvAtPrev, effMV)) *
+                        smoothstep(0.65f * pace, 0.35f * pace, length(mvAtPrev));
         
-        if (wrongPrev && !wrongCurr) {
-            sharePrev = 0.0f; // Prev frame is occluded by foreground; take 100% warped Curr frame
-        } else if (wrongCurr && !wrongPrev) {
-            sharePrev = 1.0f; // Curr frame is occluded by foreground; take 100% warped Prev frame
+        if (occPrev > occCurr + 0.05f) {
+            sharePrev = 0.5f * (1.0f - saturate((occPrev - occCurr) * 1.25f));
+        } else if (occCurr > occPrev + 0.05f) {
+            sharePrev = mix(0.5f, 1.0f, saturate((occCurr - occPrev) * 1.25f));
         }
     }
     
     // ========================================================================
-    // 4. Round 56 Clamped Catmull-Rom Sharp Read & Anti-Double-Image Lean:
+    // 4. SMFG 1.3 Motion-Adaptive Clamped Catmull-Rom Sharp Read & Anti-Double-Image Lean:
     // Preserves native texture crispness during sub-pixel warps and smoothly leans to a
     // single warped frame when sampleCurr and samplePrev diverge, eliminating ghosting and smearing.
     // ========================================================================
-    float4 sampleCurr = sample_sharp_clamped(sourceTexture, uvCurr, texelSize);
+    float4 sampleCurr = sample_sharp_clamped(sourceTexture, uvCurr, texelSize, pace);
     if (sharePrev <= 0.001f) {
         if (uniforms.debugTint > 0.5f) {
             sampleCurr.g = min(1.0f, sampleCurr.g * 1.35f + 0.15f);
@@ -519,7 +560,7 @@ fragment float4 metalfg_fragment(RasterizerData in [[stage_in]],
         return sampleCurr;
     }
     
-    float4 samplePrev = sample_sharp_clamped(prevTexture, uvPrev, texelSize);
+    float4 samplePrev = sample_sharp_clamped(prevTexture, uvPrev, texelSize, pace);
     if (sharePrev >= 0.999f) {
         if (uniforms.debugTint > 0.5f) {
             samplePrev.g = min(1.0f, samplePrev.g * 1.35f + 0.15f);

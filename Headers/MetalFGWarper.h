@@ -49,6 +49,9 @@ extern const char kMetalFGIsSyntheticKey;
 - (BOOL)processAndInterpolateNativeDrawable:(id<CAMetalDrawable>)drawable;
 - (BOOL)presentCachedNativeFrameToDrawable:(id<CAMetalDrawable>)targetDrawable;
 
+// Reset history (e.g. after irregular stall/hitch)
+- (void)resetFrameHistory;
+
 // Check if a synthetic frame is currently processing on GPU
 - (BOOL)isGpuBusy;
 

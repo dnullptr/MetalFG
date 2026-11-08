@@ -50,6 +50,7 @@ enum MetalFGTextureIndices {
     MetalFGBMETexturePrev = 0,
     MetalFGBMETextureCurr = 1,
     MetalFGBMETextureMotionVectors = 2,
+    MetalFGBMETexturePrevMotionVectors = 3,
     
     // Median Filter Compute Kernel Texture Indices
     MetalFGSmoothTextureInput = 0,
